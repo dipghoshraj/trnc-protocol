@@ -78,6 +78,12 @@ pub enum TransportError {
     Timeout,
     /// An underlying [`std::io::Error`].
     Io(std::io::Error),
+
+    /// An operation targeted a stream that does not exist.
+    UnknownStream(u32),
+
+    /// An attempt was made to send data on a stream that is not currently writable.
+    StreamNotWritable(u32),
 }
 
 impl std::fmt::Display for TransportError {
@@ -98,6 +104,8 @@ impl std::fmt::Display for TransportError {
             TransportError::Timeout => write!(f, "Operation timed out"),
             TransportError::Io(e) => write!(f, "I/O error: {}", e),
             TransportError::StreamIdExhausted => write!(f, "No more stream IDs available"),
+            TransportError::UnknownStream(id) => write!(f, "Unknown stream: {}", id),
+            TransportError::StreamNotWritable(id) => write!(f, "Stream {} is not writable", id),
         }
     }
 }

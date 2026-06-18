@@ -4,6 +4,7 @@ use crate::tcp::connection::{Connection};
 use crate::tcp::stream::{Stream, StreamState};
 use std::collections::HashMap;
 
+use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncWrite};
 use crate::frame::{frame::Frametype, header::FLAG_CONTROL, frame::Frame};
 use crate::errors::TransportError;
@@ -57,6 +58,27 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
         self.buffer_and_maybe_flush(&open_frame).await?;
 
         Ok(id)
+    }
+
+    pub async fn send_data(&mut self, stream_id: u32, payload: Vec<u8>) -> Result<(), TransportError> {
+        
+        if payload.is_empty() {
+            // Zero-byte data frames are a no-op; skip the overhead.
+            return Ok(());
+        }
+
+        let stream = self.streams.get_mut(&stream_id)
+            .ok_or(TransportError::UnknownStream(stream_id))?;
+
+        // State check: can we send in the current state?
+        if !stream.state.can_send() {
+            return Err(TransportError::StreamNotWritable(stream_id));
+        }
+
+
+        let data_frame = Frame::new(Frametype::Data, 0, stream_id, payload );
+        self.buffer_and_maybe_flush(&data_frame).await?;
+        Ok(())
     }
 
     // ── Internal helpers ───────────────────────────────────────────────────────
