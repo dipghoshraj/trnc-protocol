@@ -107,7 +107,7 @@ impl Frame {
         Frame { header, payload }
     }
     
-    pub fn empty(stream_id: u32, frame_type: frame::frame::Frametype, flags: u16) -> Self {
+    pub fn empty(frame_type: frame::frame::Frametype, flags: u16, stream_id: u32) -> Self {
         Self::new(frame_type, flags, stream_id, Vec::new()) 
     }
 }

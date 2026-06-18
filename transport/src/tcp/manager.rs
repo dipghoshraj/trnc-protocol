@@ -4,9 +4,8 @@ use crate::tcp::connection::{Connection};
 use crate::tcp::stream::{Stream, StreamState};
 use std::collections::HashMap;
 
-use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncWrite};
-use crate::frame::{frame::Frametype, header::FLAG_CONTROL, frame::Frame};
+use crate::frame::{frame::Frametype, frame::Frame};
 use crate::errors::TransportError;
 
 const FLUSH_THRESHOLD: usize = 32 * 1024;
@@ -43,18 +42,14 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
     }
 
     pub async fn open_stream(&mut self) -> Result<u32, TransportError> {
-        
-        if self.next_local_id == 0 {
-            return Err(TransportError::StreamIdExhausted);
-        }
-
         let id = self.next_local_id;
-        self.next_local_id = self.next_local_id.wrapping_add(2);
+        self.next_local_id = self.next_local_id
+            .checked_add(2)
+            .ok_or(TransportError::StreamIdExhausted)?;
 
         self.streams.insert(id, Stream::new(id));
 
-
-        let open_frame = Frame::empty(id, Frametype::Open, FLAG_CONTROL);
+        let open_frame = Frame::empty(Frametype::Open, 0, id);
         self.buffer_and_maybe_flush(&open_frame).await?;
 
         Ok(id)
@@ -75,8 +70,11 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
             return Err(TransportError::StreamNotWritable(stream_id));
         }
 
+        // Flow-control check: ensure the peer's window covers this payload.
+        stream.check_send_window(payload.len())?;
+        stream.consume_send_window(payload.len());
 
-        let data_frame = Frame::new(Frametype::Data, 0, stream_id, payload );
+        let data_frame = Frame::new(Frametype::Data, 0, stream_id, payload);
         self.buffer_and_maybe_flush(&data_frame).await?;
         Ok(())
     }
