@@ -41,6 +41,27 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
         }
     }
 
+    async fn buffer_and_maybe_flush(&mut self, frame: &Frame,) -> Result<(), TransportError> {
+        self.conn.buffer_frame(frame)?;
+
+        if self.conn.write_buf_len() >= FLUSH_THRESHOLD {
+            self.conn.flush().await?;
+        }
+        Ok(())
+    }
+
+    pub fn stream_count(&self) -> usize {
+        self.streams.len()
+    }
+
+    pub fn stream_state(&self, stream_id: u32) -> Option<StreamState> {
+        self.streams.get(&stream_id).map(|s| s.state)
+    }
+
+    pub fn send_window(&self, stream_id: u32) -> Option<i64> {
+        self.streams.get(&stream_id).map(|s| s.send_window)
+    }
+
     pub async fn open_stream(&mut self) -> Result<u32, TransportError> {
         let id = self.next_local_id;
         self.next_local_id = self.next_local_id
@@ -58,14 +79,11 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
     pub async fn send_data(&mut self, stream_id: u32, payload: Vec<u8>) -> Result<(), TransportError> {
         
         if payload.is_empty() {
-            // Zero-byte data frames are a no-op; skip the overhead.
             return Ok(());
         }
 
-        let stream = self.streams.get_mut(&stream_id)
-            .ok_or(TransportError::UnknownStream(stream_id))?;
+        let stream = self.streams.get_mut(&stream_id).ok_or(TransportError::UnknownStream(stream_id))?;
 
-        // State check: can we send in the current state?
         if !stream.state.can_send() {
             return Err(TransportError::StreamNotWritable(stream_id));
         }
@@ -79,32 +97,30 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
         Ok(())
     }
 
-    // ── Internal helpers ───────────────────────────────────────────────────────
+    pub async fn close_stream(&mut self, stream_id: u32) -> Result<(), TransportError> {
+        let now_closed = {
+            let stream = self.streams.get_mut(&stream_id)
+                .ok_or(TransportError::UnknownStream(stream_id))?;
 
-    // Buffer a frame and auto-flush if the write buffer is large enough.
-    // This is the core of the write-batching strategy.
-    async fn buffer_and_maybe_flush(&mut self, frame: &Frame,) -> Result<(), TransportError> {
-        self.conn.buffer_frame(frame)?;
+            if stream.state.is_terminal() {
+                return Err(TransportError::StreamClosed(stream_id));
+            }
 
-        // Auto-flush if buffer has grown past FLUSH_THRESHOLD.
-        if self.conn.write_buf_len() >= FLUSH_THRESHOLD {
-            self.conn.flush().await?;
+            stream.on_local_close();
+            stream.state == StreamState::Closed
+        };
+
+        // Send Close with FIN flag. Empty payload.
+        let close_frame = Frame::empty(stream_id, FrameType::Close, FLAG_FIN);
+        self.buffer_and_maybe_flush(&close_frame).await?;
+
+        // If both sides have now closed (we were HalfClosedRemote),
+        // remove the stream from the map — it is fully done.
+        if now_closed {
+            self.streams.remove(&stream_id);
         }
+
         Ok(())
     }
-
-    // ── Introspection ──────────────────────────────────────────────────────────
-    pub fn stream_count(&self) -> usize {
-        self.streams.len()
-    }
-
-    pub fn stream_state(&self, stream_id: u32) -> Option<StreamState> {
-        self.streams.get(&stream_id).map(|s| s.state)
-    }
-
-    pub fn send_window(&self, stream_id: u32) -> Option<i64> {
-        self.streams.get(&stream_id).map(|s| s.send_window)
-    }
-
 
 }
