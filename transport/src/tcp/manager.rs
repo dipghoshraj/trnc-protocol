@@ -5,7 +5,7 @@ use crate::tcp::stream::{Stream, StreamState};
 use std::collections::HashMap;
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use crate::frame::{frame::Frametype, frame::Frame};
+use crate::frame::{frame::Frametype, frame::Frame, header::FLAG_FIN};
 use crate::errors::TransportError;
 
 const FLUSH_THRESHOLD: usize = 32 * 1024;
@@ -99,10 +99,8 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
 
     pub async fn close_stream(&mut self, stream_id: u32) -> Result<(), TransportError> {
         let now_closed = {
-            let stream = self.streams.get_mut(&stream_id)
-                .ok_or(TransportError::UnknownStream(stream_id))?;
-
-            if stream.state.is_terminal() {
+            let stream = self.streams.get_mut(&stream_id).ok_or(TransportError::UnknownStream(stream_id))?;
+            if stream.state.is_closed() {
                 return Err(TransportError::StreamClosed(stream_id));
             }
 
@@ -110,12 +108,9 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
             stream.state == StreamState::Closed
         };
 
-        // Send Close with FIN flag. Empty payload.
-        let close_frame = Frame::empty(stream_id, FrameType::Close, FLAG_FIN);
+        let close_frame = Frame::empty( Frametype::Close, FLAG_FIN, stream_id);
         self.buffer_and_maybe_flush(&close_frame).await?;
 
-        // If both sides have now closed (we were HalfClosedRemote),
-        // remove the stream from the map — it is fully done.
         if now_closed {
             self.streams.remove(&stream_id);
         }
