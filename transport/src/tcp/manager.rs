@@ -62,6 +62,10 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
         self.streams.get(&stream_id).map(|s| s.send_window)
     }
 
+    pub async fn flush(&mut self) -> Result<(), TransportError> {
+        self.conn.flush().await
+    }
+
     pub async fn open_stream(&mut self) -> Result<u32, TransportError> {
         let id = self.next_local_id;
         self.next_local_id = self.next_local_id
@@ -117,5 +121,19 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
 
         Ok(())
     }
+
+    pub async fn reset_stream(&mut self, stream_id: u32) -> Result<(), TransportError> {
+        let stream = self.streams.get_mut(&stream_id)
+            .ok_or(TransportError::UnknownStream(stream_id))?;
+
+        stream.on_reset();
+
+        let reset_frame = Frame::empty(Frametype::Reset, 0, stream_id);
+        self.conn.send_frame(&reset_frame).await?;
+        self.streams.remove(&stream_id);
+        Ok(())
+    }
+
+
 
 }
