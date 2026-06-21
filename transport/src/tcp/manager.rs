@@ -1,12 +1,14 @@
 
 
-use crate::tcp::connection::{Connection};
+use crate::tcp::connection::Connection;
 use crate::tcp::stream::{Stream, StreamState};
+use crate::tcp::receiver;
 use std::collections::HashMap;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use crate::frame::{frame::Frametype, frame::Frame, header::FLAG_FIN};
 use crate::errors::TransportError;
+use bytes::Bytes;
 
 const FLUSH_THRESHOLD: usize = 32 * 1024;
 
@@ -134,6 +136,30 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
         Ok(())
     }
 
+    pub fn recv_data(&mut self, stream_id: u32) -> Result<Option<Bytes>, TransportError> {
+        let stream = self.streams.get_mut(&stream_id)
+            .ok_or(TransportError::UnknownStream(stream_id))?;
 
+        Ok(stream.pop_recv())
+    }
 
+    pub async fn recv_frame(&mut self) -> Result<u32, TransportError> {
+        let frame = self.conn.recv_frame().await?;
+        let stream_id = frame.header.stream_id;
+
+        match frame.header.frame_type {
+            Frametype::Open    => receiver::handle_open(&mut self.streams, self.role, stream_id)?,
+            Frametype::Data    => receiver::handle_data(&mut self.streams, stream_id, frame.payload)?,
+            Frametype::Close   => receiver::handle_close(&mut self.streams, stream_id)?,
+            Frametype::Reset   => receiver::handle_reset(&mut self.streams, stream_id),
+            Frametype::Window  => receiver::handle_window(&mut self.streams, stream_id, &frame.payload)?,
+
+            // Phase 4+: handshake and heartbeat frames handled here.
+            Frametype::Ping | Frametype::Pong |
+            Frametype::Settings | Frametype::Hello | Frametype::Welcome |
+            Frametype::Error => {}
+        }
+
+        Ok(stream_id)
+    }
 }
