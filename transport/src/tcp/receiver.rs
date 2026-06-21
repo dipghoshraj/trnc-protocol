@@ -6,11 +6,7 @@ use crate::tcp::manager::Role;
 use crate::tcp::stream::{Stream, StreamState};
 
 /// Handles an incoming `Open` frame: validates ID parity and registers the new stream.
-pub fn handle_open(
-    streams: &mut HashMap<u32, Stream>,
-    role: Role,
-    stream_id: u32,
-) -> Result<(), TransportError> {
+pub fn handle_open(streams: &mut HashMap<u32, Stream>, role: Role, stream_id: u32) -> Result<(), TransportError> {
     let expected_parity = match role {
         Role::Initiator => 0, // remote is Acceptor → even IDs
         Role::Acceptor  => 1, // remote is Initiator → odd IDs
@@ -32,11 +28,7 @@ pub fn handle_open(
 }
 
 /// Handles an incoming `Data` frame: validates stream state and enqueues the payload.
-pub fn handle_data(
-    streams: &mut HashMap<u32, Stream>,
-    stream_id: u32,
-    payload: Vec<u8>,
-) -> Result<(), TransportError> {
+pub fn handle_data( streams: &mut HashMap<u32, Stream>, stream_id: u32, payload: Vec<u8>) -> Result<(), TransportError> {
     let stream = streams
         .get_mut(&stream_id)
         .ok_or(TransportError::UnknownStream(stream_id))?;
@@ -53,10 +45,7 @@ pub fn handle_data(
 
 /// Handles an incoming `Close` frame: advances the stream's half-close state,
 /// removing the stream entirely if both sides have now closed.
-pub fn handle_close(
-    streams: &mut HashMap<u32, Stream>,
-    stream_id: u32,
-) -> Result<(), TransportError> {
+pub fn handle_close( streams: &mut HashMap<u32, Stream>, stream_id: u32) -> Result<(), TransportError> {
     let now_closed = {
         let stream = streams
             .get_mut(&stream_id)
@@ -81,11 +70,7 @@ pub fn handle_reset(streams: &mut HashMap<u32, Stream>, stream_id: u32) {
 
 /// Handles an incoming `Window` frame: parses the 4-byte big-endian increment
 /// and applies it to the stream's send window.
-pub fn handle_window(
-    streams: &mut HashMap<u32, Stream>,
-    stream_id: u32,
-    payload: &[u8],
-) -> Result<(), TransportError> {
+pub fn handle_window( streams: &mut HashMap<u32, Stream>, stream_id: u32, payload: &[u8]) -> Result<(), TransportError> {
     let stream = streams
         .get_mut(&stream_id)
         .ok_or(TransportError::UnknownStream(stream_id))?;
