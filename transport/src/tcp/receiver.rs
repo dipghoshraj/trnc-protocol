@@ -62,9 +62,6 @@ pub fn handle_close( streams: &mut HashMap<u32, Stream>, stream_id: u32) -> Resu
 
 /// Handles an incoming `Reset` frame: tears down the stream immediately.
 pub fn handle_reset(streams: &mut HashMap<u32, Stream>, stream_id: u32) {
-    if let Some(stream) = streams.get_mut(&stream_id) {
-        stream.on_reset();
-    }
     streams.remove(&stream_id);
 }
 

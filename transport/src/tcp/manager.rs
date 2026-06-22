@@ -6,7 +6,7 @@ use crate::tcp::receiver;
 use std::collections::HashMap;
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use crate::frame::{frame::Frametype, frame::Frame, header::{FLAG_FIN, MAX_FRAME_SIZE}};
+use crate::frame::{frame::Frametype, frame::Frame, header::{FLAG_FIN, FLAG_CONTROL, MAX_FRAME_SIZE}};
 use crate::errors::TransportError;
 use bytes::Bytes;
 
@@ -170,8 +170,14 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
             Frametype::Reset   => receiver::handle_reset(&mut self.streams, stream_id),
             Frametype::Window  => receiver::handle_window(&mut self.streams, stream_id, &frame.payload)?,
 
-            // Phase 4+: handshake and heartbeat frames handled here.
-            Frametype::Ping | Frametype::Pong |
+            Frametype::Ping => {
+                // Echo the payload back as a Pong so keep-alive probes succeed.
+                let pong = Frame::new(Frametype::Pong, FLAG_CONTROL, 0, frame.payload);
+                self.buffer_and_maybe_flush(&pong).await?;
+            }
+
+            // Pong, Settings, Hello, Welcome, Error: handled in a later phase.
+            Frametype::Pong |
             Frametype::Settings | Frametype::Hello | Frametype::Welcome |
             Frametype::Error => {}
         }
