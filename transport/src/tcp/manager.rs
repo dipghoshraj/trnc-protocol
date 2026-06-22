@@ -6,7 +6,7 @@ use crate::tcp::receiver;
 use std::collections::HashMap;
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use crate::frame::{frame::Frametype, frame::Frame, header::FLAG_FIN};
+use crate::frame::{frame::Frametype, frame::Frame, header::{FLAG_FIN, MAX_FRAME_SIZE}};
 use crate::errors::TransportError;
 use bytes::Bytes;
 
@@ -88,6 +88,10 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
             return Ok(());
         }
 
+        if payload.len() > MAX_FRAME_SIZE {
+            return Err(TransportError::FrameTooLarge { size: payload.len(), max: MAX_FRAME_SIZE });
+        }
+
         let stream = self.streams.get_mut(&stream_id).ok_or(TransportError::UnknownStream(stream_id))?;
 
         if !stream.state.can_send() {
@@ -136,11 +140,23 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
         Ok(())
     }
 
-    pub fn recv_data(&mut self, stream_id: u32) -> Result<Option<Bytes>, TransportError> {
-        let stream = self.streams.get_mut(&stream_id)
-            .ok_or(TransportError::UnknownStream(stream_id))?;
+    pub async fn recv_data(&mut self, stream_id: u32) -> Result<Option<Bytes>, TransportError> {
+        let (payload, should_send_window) = {
+            let stream = self.streams.get_mut(&stream_id)
+                .ok_or(TransportError::UnknownStream(stream_id))?;
+            let can_recv = stream.state.can_receive();
+            (stream.pop_recv(), can_recv)
+        };
 
-        Ok(stream.pop_recv())
+        if let Some(ref data) = payload {
+            if should_send_window && !data.is_empty() {
+                let increment = data.len() as u32;
+                let window_frame = Frame::new(Frametype::Window, 0, stream_id, increment.to_be_bytes().to_vec());
+                self.buffer_and_maybe_flush(&window_frame).await?;
+            }
+        }
+
+        Ok(payload)
     }
 
     pub async fn recv_frame(&mut self) -> Result<u32, TransportError> {

@@ -93,8 +93,9 @@ impl Stream {
     }
 
     // Add `increment` to send_window when a Window frame arrives from remote.increment is a u32 from the wire; we widen to i64 before adding.
+    // saturating_add prevents i64 overflow from a malicious peer sending repeated Window frames.
     pub fn apply_window_increment(&mut self, increment: u32) {
-        self.send_window += increment as i64;
+        self.send_window = self.send_window.saturating_add(increment as i64);
     }
 
     // Enqueue an inbound payload for the application to consume. Called by StreamManager when a Data frame arrives for this stream.

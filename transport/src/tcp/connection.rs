@@ -1,6 +1,6 @@
 use bytes::{Buf, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use crate::{errors::TransportError, frame::frame::Frame, frame::encoder::encode, frame::decoder::decode};
+use crate::{errors::TransportError, frame::frame::Frame, frame::encoder::encode, frame::decoder::decode, frame::header};
 
 /// Maximum allowed size of the internal write buffer in bytes (256 KiB).
 ///
@@ -13,6 +13,13 @@ const MIN_BUFFER_SIZE: usize = 64 * 1024;
 
 /// Number of bytes requested from the OS in each [`AsyncReadExt::read_buf`] call (8 KiB).
 const CHUNK_SIZE: usize = 8 * 1024;
+
+/// Maximum allowed size of the read buffer (one complete max-size frame).
+///
+/// If the buffer grows beyond this before a complete frame can be decoded,
+/// the connection is torn down with [`TransportError::FrameTooLarge`] to
+/// prevent a peer from forcing unbounded memory allocation.
+const MAX_READ_BUFFER_SIZE: usize = header::MAX_FRAME_SIZE + header::HEADER_SIZE;
 
 
 /// An async, buffered connection that sends and receives TRNC [`Frame`]s.
@@ -101,6 +108,7 @@ impl <T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         }
         self.stream.write_all(&self.write_buffer).await?;
         self.write_buffer.clear();
+        self.stream.flush().await?;
         Ok(())
     }
 
@@ -160,6 +168,13 @@ impl <T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 }
             }
  
+            if self.read_buffer.len() >= MAX_READ_BUFFER_SIZE {
+                return Err(TransportError::FrameTooLarge {
+                    size: self.read_buffer.len(),
+                    max: header::MAX_FRAME_SIZE,
+                });
+            }
+
             self.read_buffer.reserve(CHUNK_SIZE);
 
             let n = self.stream.read_buf(&mut self.read_buffer).await?;
