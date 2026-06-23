@@ -159,21 +159,42 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
         Ok(payload)
     }
 
-    pub async fn recv_frame(&mut self) -> Result<u32, TransportError> {
+    /// Send a [`Frametype::Ping`] frame and flush immediately.
+    ///
+    /// The remote peer echoes the payload back in a [`Frametype::Pong`] frame,
+    /// which the next call to [`recv_frame`](Self::recv_frame) will return to
+    /// the caller.
+    pub async fn send_ping(&mut self, payload: Vec<u8>) -> Result<(), TransportError> {
+        let ping = Frame::new(Frametype::Ping, FLAG_CONTROL, 0, payload);
+        self.conn.send_frame(&ping).await
+    }
+
+    /// Read the next frame from the connection, dispatch it to the appropriate
+    /// internal handler, and return the raw [`Frame`] to the caller.
+    ///
+    /// The caller can inspect [`Frame::header`] to determine what arrived
+    /// (`frame_type`, `stream_id`, `flags`).  For `Data` frames the payload is
+    /// also available in the returned [`Frame`]; the same bytes are queued in
+    /// the stream's receive buffer and can be consumed with
+    /// [`recv_data`](Self::recv_data).
+    pub async fn recv_frame(&mut self) -> Result<Frame, TransportError> {
         let frame = self.conn.recv_frame().await?;
         let stream_id = frame.header.stream_id;
 
         match frame.header.frame_type {
             Frametype::Open    => receiver::handle_open(&mut self.streams, self.role, stream_id)?,
-            Frametype::Data    => receiver::handle_data(&mut self.streams, stream_id, frame.payload)?,
+            // Clone payload: the original stays in `frame` so the caller can inspect it.
+            Frametype::Data    => receiver::handle_data(&mut self.streams, stream_id, frame.payload.clone())?,
             Frametype::Close   => receiver::handle_close(&mut self.streams, stream_id)?,
             Frametype::Reset   => receiver::handle_reset(&mut self.streams, stream_id),
             Frametype::Window  => receiver::handle_window(&mut self.streams, stream_id, &frame.payload)?,
 
             Frametype::Ping => {
-                // Echo the payload back as a Pong so keep-alive probes succeed.
-                let pong = Frame::new(Frametype::Pong, FLAG_CONTROL, 0, frame.payload);
-                self.buffer_and_maybe_flush(&pong).await?;
+                // Reply immediately with a Pong carrying the same payload.
+                // Use send_frame (flush included) so the Pong is not held
+                // in the write buffer waiting for the flush threshold.
+                let pong = Frame::new(Frametype::Pong, FLAG_CONTROL, 0, frame.payload.clone());
+                self.conn.send_frame(&pong).await?;
             }
 
             // Pong, Settings, Hello, Welcome, Error: handled in a later phase.
@@ -182,6 +203,6 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
             Frametype::Error => {}
         }
 
-        Ok(stream_id)
+        Ok(frame)
     }
 }

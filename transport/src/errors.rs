@@ -110,6 +110,15 @@ impl std::fmt::Display for TransportError {
     }
 }
 
+impl std::error::Error for TransportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            TransportError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
 impl From<std::io::Error> for TransportError {
     fn from(e: std::io::Error) -> Self {
         TransportError::Io(e)
