@@ -126,6 +126,11 @@ impl <T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         self.flush().await
     }
  
+    /// Extract the underlying stream from the connection.
+    pub fn into_inner(self) -> T {
+        self.stream
+    }
+ 
     /// Returns the number of bytes currently sitting in the write buffer
     /// (i.e. encoded but not yet flushed to the stream).
     pub fn write_buf_len(&self) -> usize {

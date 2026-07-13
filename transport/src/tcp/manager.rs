@@ -43,6 +43,11 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
         }
     }
 
+    /// Consume the manager and return the underlying connection.
+    pub fn into_connection(self) -> Connection<T> {
+        self.conn
+    }
+
     async fn buffer_and_maybe_flush(&mut self, frame: &Frame,) -> Result<(), TransportError> {
         self.conn.buffer_frame(frame)?;
 
