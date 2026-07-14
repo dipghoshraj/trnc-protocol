@@ -41,6 +41,10 @@ pub enum ErrorCode {
     Timeout            = 9,
     /// An internal implementation error that should not occur in production.
     InternalError      = 10,
+    // Action not found
+    ActionNotFound     = 11,
+    // Internal error codes (not sent over the wire)
+    InternalIoError     = 12
 }
 
 /// All errors that can be returned by the `transport` crate.
@@ -84,6 +88,10 @@ pub enum TransportError {
 
     /// An attempt was made to send data on a stream that is not currently writable.
     StreamNotWritable(u32),
+    /// An action was requested that does not exist.
+    ActionNotFound(String),
+    /// An internal error occurred that should not happen in production.
+    InternalError(String),
 }
 
 impl std::fmt::Display for TransportError {
@@ -106,6 +114,8 @@ impl std::fmt::Display for TransportError {
             TransportError::StreamIdExhausted => write!(f, "No more stream IDs available"),
             TransportError::UnknownStream(id) => write!(f, "Unknown stream: {}", id),
             TransportError::StreamNotWritable(id) => write!(f, "Stream {} is not writable", id),
+            TransportError::ActionNotFound(action) => write!(f, "Action not found: {}", action),
+            TransportError::InternalError(msg) => write!(f, "Internal error: {}", msg),
         }
     }
 }
