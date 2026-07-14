@@ -43,7 +43,7 @@ const MAX_READ_BUFFER_SIZE: usize = header::MAX_FRAME_SIZE + header::HEADER_SIZE
 ///
 /// ```no_run
 /// use tokio::net::TcpStream;
-/// use transport::tcp::Connection;
+/// use transport::tcp::connection::Connection;
 /// use transport::frame::frame::{Frame, Frametype};
 ///
 /// # #[tokio::main]
