@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use byteser::ByteSerializable;
 use crate::{
+    errors::{ErrorPayload, TransportError},
     frame::frame::Frametype,
     tcp::{connection::Connection, manager::{Role, StreamManager}},
 };
@@ -43,6 +44,7 @@ impl ResilientClient {
         })?;
 
         let mut manager = StreamManager::new(Connection::new(tcp), Role::Initiator);
+        manager.start_handshake().await?;
         let stream_id = manager.open_stream().await?;
         println!("[client] opened stream {stream_id}");
 
@@ -77,11 +79,12 @@ impl ResilientClient {
                     .into())
                 }
                 Frametype::Error => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "error frame received on stream",
-                    )
-                    .into())
+                    let error_payload = ErrorPayload::decode(&frame.payload)?;
+                    return Err(Box::new(TransportError::RemoteError(
+                        error_payload.error_code,
+                        error_payload.stream_id,
+                        error_payload.message,
+                    )));
                 }
                 _ => continue,
             }
