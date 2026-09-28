@@ -1,0 +1,21 @@
+[package]
+name = "interface"
+version = "0.1.0"
+edition = "2021"
+description = "Interface for testing the transport protocol"
+
+[dependencies]
+transport = { path = "../transport" }
+tokio = { version = "1.52.3", features = ["full"] }
+byteser = "0.1.1"
+byteser_derive = "0.1.0"
+async-trait = "0.1.68"
+clap = { version = "4.4", features = ["derive"] }
+
+[[bin]]
+name = "server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "client"
+path = "src/bin/client.rs"
