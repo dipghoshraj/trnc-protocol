@@ -3,12 +3,52 @@
 /// Structured payload carried inside a wire-level [`crate::frame::frame::Frametype::Error`] frame.
 #[derive(Debug)]
 pub struct ErrorPayload {
-    /// Application-level error code (maps to [`ErrorCode`]).
-    pub error_code: u16,
+    /// Application-level error code.
+    pub error_code: ErrorCode,
     /// Stream this error applies to (`0` for connection-scoped errors).
     pub stream_id: u32,
-    /// Byte-length of the human-readable message that follows in the payload.
-    pub message_len: u16,
+    /// Human-readable message describing the problem.
+    pub message: String,
+}
+
+impl ErrorPayload {
+    pub fn encode(&self) -> Vec<u8> {
+        let message_bytes = self.message.as_bytes();
+        let mut payload = Vec::with_capacity(8 + message_bytes.len());
+        payload.extend_from_slice(&(self.error_code as u16).to_be_bytes());
+        payload.extend_from_slice(&self.stream_id.to_be_bytes());
+        payload.extend_from_slice(&(message_bytes.len() as u16).to_be_bytes());
+        payload.extend_from_slice(message_bytes);
+        payload
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, TransportError> {
+        if bytes.len() < 8 {
+            return Err(TransportError::InvalidFrame(
+                "Error frame payload must be at least 8 bytes".into(),
+            ));
+        }
+
+        let error_code = u16::from_be_bytes([bytes[0], bytes[1]]);
+        let stream_id = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
+        let message_len = u16::from_be_bytes([bytes[6], bytes[7]]) as usize;
+
+        if bytes.len() != 8 + message_len {
+            return Err(TransportError::InvalidFrame(
+                "Error frame payload length does not match message length".into(),
+            ));
+        }
+
+        let message = String::from_utf8(bytes[8..].to_vec()).map_err(|_| {
+            TransportError::InvalidFrame("Error frame message is not valid UTF-8".into())
+        })?;
+
+        Ok(ErrorPayload {
+            error_code: ErrorCode::from_u16(error_code).unwrap_or(ErrorCode::Unknown),
+            stream_id,
+            message,
+        })
+    }
 }
 
 /// Application-level error codes sent inside [`ErrorPayload`].
@@ -16,7 +56,7 @@ pub struct ErrorPayload {
 /// These codes are transmitted over the wire as `u16` big-endian values and
 /// let the remote peer distinguish recoverable stream errors from fatal
 /// connection errors without parsing a free-form message.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum ErrorCode {
     /// Catch-all; used when no more-specific code applies.
@@ -35,7 +75,7 @@ pub enum ErrorCode {
     StreamReset        = 6,
     /// The sender exceeded its advertised flow-control window.
     FlowControlViolation = 7,
-    /// The connection handshake could not be completed.
+    /// The connection handshake was rejected; the payload includes a message.
     HandshakeRejected  = 8,
     /// The peer failed to respond within the configured timeout.
     Timeout            = 9,
@@ -44,7 +84,28 @@ pub enum ErrorCode {
     // Action not found
     ActionNotFound     = 11,
     // Internal error codes (not sent over the wire)
-    InternalIoError     = 12
+    InternalIoError    = 12,
+}
+
+impl ErrorCode {
+    pub fn from_u16(value: u16) -> Option<Self> {
+        match value {
+            0 => Some(ErrorCode::Unknown),
+            1 => Some(ErrorCode::ProtocolError),
+            2 => Some(ErrorCode::InvalidVersion),
+            3 => Some(ErrorCode::InvalidFrame),
+            4 => Some(ErrorCode::FrameTooLarge),
+            5 => Some(ErrorCode::StreamClosed),
+            6 => Some(ErrorCode::StreamReset),
+            7 => Some(ErrorCode::FlowControlViolation),
+            8 => Some(ErrorCode::HandshakeRejected),
+            9 => Some(ErrorCode::Timeout),
+            10 => Some(ErrorCode::InternalError),
+            11 => Some(ErrorCode::ActionNotFound),
+            12 => Some(ErrorCode::InternalIoError),
+            _ => None,
+        }
+    }
 }
 
 /// All errors that can be returned by the `transport` crate.
@@ -69,6 +130,8 @@ pub enum TransportError {
     FlowControlViolation { stream_id: u32 },
     /// The connection handshake was rejected with the given code and message.
     HandshakeRejected { code: ErrorCode, message: String },
+    /// The remote peer sent an `Error` frame.
+    RemoteError(ErrorCode, u32, String),
     /// The decoder needs more bytes before it can produce a complete frame.
     ///
     /// This is an internal sentinel used by [`crate::frame::decoder`]; callers
@@ -107,6 +170,7 @@ impl std::fmt::Display for TransportError {
             TransportError::StreamReset(id) => write!(f, "Stream {} was reset by remote", id),
             TransportError::FlowControlViolation { stream_id } => write!(f, "Flow control violation on stream {}", stream_id),
             TransportError::HandshakeRejected { code, message } => write!(f, "Handshake rejected: {:?} - {}", code, message),
+            TransportError::RemoteError(code, stream_id, message) => write!(f, "Remote error: {:?} on stream {}: {}", code, stream_id, message),
             TransportError::NeedMoreData => write!(f, "Need more data to parse frame"),
             TransportError::BufferOverflow => write!(f, "Buffer overflow"),
             TransportError::Timeout => write!(f, "Operation timed out"),
