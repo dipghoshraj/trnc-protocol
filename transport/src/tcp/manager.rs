@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use crate::frame::{frame::Frametype, frame::Frame, header::{FLAG_FIN, FLAG_CONTROL, MAX_FRAME_SIZE}};
-use crate::errors::TransportError;
+use crate::errors::{ErrorCode, ErrorPayload, TransportError};
 use bytes::Bytes;
 
 const FLUSH_THRESHOLD: usize = 32 * 1024;
@@ -18,12 +18,23 @@ pub enum Role {
     Acceptor, // server side
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandshakeState {
+    /// Waiting for an initial Hello frame from the remote peer.
+    AwaitingHello,
+    /// The local peer sent Hello and is waiting for Welcome.
+    AwaitingWelcome,
+    /// The connection handshake completed successfully.
+    Established,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamManager<T> {
     conn: Connection<T>,
     streams: HashMap<u32, Stream>,
     next_local_id: u32,
     role: Role,
+    handshake_state: HandshakeState,
 }
 
 impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
@@ -40,7 +51,160 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
             streams: HashMap::new(),
             next_local_id,
             role,
+            handshake_state: HandshakeState::AwaitingHello,
         }
+    }
+
+    /// Returns the current connection handshake state.
+    pub fn handshake_state(&self) -> HandshakeState {
+        self.handshake_state
+    }
+
+    /// Begin the connection handshake from the initiator side.
+    ///
+    /// For `Role::Initiator`, this sends a `Hello` frame and transitions into
+    /// `HandshakeState::AwaitingWelcome`.
+    pub async fn start_handshake(&mut self) -> Result<(), TransportError> {
+        if self.handshake_state == HandshakeState::Established {
+            return Ok(());
+        }
+        if self.role == Role::Initiator {
+            self.send_hello().await?;
+            self.conn.flush().await?;
+            while self.handshake_state != HandshakeState::Established {
+                let frame = self.recv_frame().await?;
+                if frame.header.frame_type == Frametype::Welcome {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_handshake_complete(&self) -> Result<(), TransportError> {
+        if self.handshake_state == HandshakeState::Established {
+            Ok(())
+        } else {
+            Err(TransportError::InvalidFrame(
+                "connection handshake is not complete".into(),
+            ))
+        }
+    }
+
+    async fn send_hello(&mut self) -> Result<(), TransportError> {
+        if self.role != Role::Initiator {
+            return Err(TransportError::InvalidFrame(
+                "only initiator may send Hello".into(),
+            ));
+        }
+        if self.handshake_state == HandshakeState::AwaitingWelcome
+            || self.handshake_state == HandshakeState::Established
+        {
+            return Ok(());
+        }
+
+        let hello = Frame::empty(Frametype::Hello, FLAG_CONTROL, 0);
+        self.conn.send_frame(&hello).await?;
+        self.handshake_state = HandshakeState::AwaitingWelcome;
+        Ok(())
+    }
+
+    async fn send_welcome(&mut self) -> Result<(), TransportError> {
+        if self.role != Role::Acceptor {
+            return Err(TransportError::InvalidFrame(
+                "only acceptor may send Welcome".into(),
+            ));
+        }
+        if self.handshake_state == HandshakeState::Established {
+            return Ok(());
+        }
+
+        let welcome = Frame::empty(Frametype::Welcome, FLAG_CONTROL, 0);
+        self.conn.send_frame(&welcome).await?;
+        self.handshake_state = HandshakeState::Established;
+        Ok(())
+    }
+
+    async fn send_error_frame(&mut self, error_payload: ErrorPayload) -> Result<(), TransportError> {
+        let error_frame = Frame::new(Frametype::Error, 0, error_payload.stream_id, error_payload.encode());
+        self.conn.send_frame(&error_frame).await
+    }
+
+    async fn fail_handshake(&mut self, message: String) -> Result<(), TransportError> {
+        let error_payload = ErrorPayload {
+            error_code: ErrorCode::HandshakeRejected,
+            stream_id: 0,
+            message,
+        };
+        self.send_error_frame(error_payload).await
+    }
+
+    async fn handle_hello(&mut self, frame: &Frame) -> Result<(), TransportError> {
+        if frame.header.stream_id != 0 {
+            return Err(TransportError::InvalidFrame(
+                "Hello frame must use stream_id 0".into(),
+            ));
+        }
+        if self.role != Role::Acceptor {
+            return Err(TransportError::InvalidFrame(
+                "only acceptor may receive Hello".into(),
+            ));
+        }
+        if self.handshake_state != HandshakeState::AwaitingHello {
+            return Err(TransportError::InvalidFrame(
+                "unexpected Hello frame".into(),
+            ));
+        }
+
+        self.send_welcome().await
+    }
+
+    fn handle_welcome(&mut self, frame: &Frame) -> Result<(), TransportError> {
+        if frame.header.stream_id != 0 {
+            return Err(TransportError::InvalidFrame(
+                "Welcome frame must use stream_id 0".into(),
+            ));
+        }
+        if self.role != Role::Initiator {
+            return Err(TransportError::InvalidFrame(
+                "only initiator may receive Welcome".into(),
+            ));
+        }
+        if self.handshake_state != HandshakeState::AwaitingWelcome {
+            return Err(TransportError::InvalidFrame(
+                "unexpected Welcome frame".into(),
+            ));
+        }
+
+        self.handshake_state = HandshakeState::Established;
+        Ok(())
+    }
+
+    fn handle_settings(&mut self, frame: &Frame) -> Result<(), TransportError> {
+        if frame.header.stream_id != 0 {
+            return Err(TransportError::InvalidFrame(
+                "Settings frame must use stream_id 0".into(),
+            ));
+        }
+
+        // Connection-level settings are accepted, but not yet acted on.
+        Ok(())
+    }
+
+    fn handle_error(&self, frame: &Frame) -> Result<Frame, TransportError> {
+        let error_payload = ErrorPayload::decode(&frame.payload)?;
+        if error_payload.error_code == ErrorCode::HandshakeRejected && error_payload.stream_id == 0 {
+            return Err(TransportError::HandshakeRejected {
+                code: error_payload.error_code,
+                message: error_payload.message,
+            });
+        }
+
+        Err(TransportError::RemoteError(
+            error_payload.error_code,
+            error_payload.stream_id,
+            error_payload.message,
+        ))
     }
 
     /// Consume the manager and return the underlying connection.
@@ -74,6 +238,8 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
     }
 
     pub async fn open_stream(&mut self) -> Result<u32, TransportError> {
+        self.ensure_handshake_complete()?;
+
         let id = self.next_local_id;
         self.next_local_id = self.next_local_id
             .checked_add(2)
@@ -88,6 +254,7 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
     }
 
     pub async fn send_data(&mut self, stream_id: u32, payload: Vec<u8>) -> Result<(), TransportError> {
+        self.ensure_handshake_complete()?;
         
         if payload.is_empty() {
             return Ok(());
@@ -113,6 +280,8 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
     }
 
     pub async fn close_stream(&mut self, stream_id: u32) -> Result<(), TransportError> {
+        self.ensure_handshake_complete()?;
+
         let now_closed = {
             let stream = self.streams.get_mut(&stream_id).ok_or(TransportError::UnknownStream(stream_id))?;
             if stream.state.is_closed() {
@@ -134,6 +303,8 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
     }
 
     pub async fn reset_stream(&mut self, stream_id: u32) -> Result<(), TransportError> {
+        self.ensure_handshake_complete()?;
+
         let stream = self.streams.get_mut(&stream_id)
             .ok_or(TransportError::UnknownStream(stream_id))?;
 
@@ -146,6 +317,8 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
     }
 
     pub async fn recv_data(&mut self, stream_id: u32) -> Result<Option<Bytes>, TransportError> {
+        self.ensure_handshake_complete()?;
+
         let (payload, should_send_window) = {
             let stream = self.streams.get_mut(&stream_id)
                 .ok_or(TransportError::UnknownStream(stream_id))?;
@@ -186,6 +359,40 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
         let frame = self.conn.recv_frame().await?;
         let stream_id = frame.header.stream_id;
 
+        if self.handshake_state != HandshakeState::Established {
+            match frame.header.frame_type {
+                Frametype::Hello => {
+                    self.handle_hello(&frame).await?;
+                }
+                Frametype::Welcome => {
+                    self.handle_welcome(&frame)?;
+                }
+                Frametype::Settings => {
+                    self.handle_settings(&frame)?;
+                }
+                Frametype::Error => {
+                    return self.handle_error(&frame);
+                }
+                Frametype::Ping | Frametype::Pong => {
+                    // Allow ping/pong during handshake without disrupting state.
+                    if frame.header.frame_type == Frametype::Ping {
+                        let pong = Frame::new(Frametype::Pong, FLAG_CONTROL, 0, frame.payload.clone());
+                        self.conn.send_frame(&pong).await?;
+                    }
+                }
+                _ => {
+                    if self.role == Role::Acceptor {
+                        self.fail_handshake("received non-handshake frame before handshake completed".into()).await.ok();
+                    }
+                    return Err(TransportError::InvalidFrame(
+                        "received frame before connection handshake completed".into(),
+                    ));
+                }
+            }
+
+            return Ok(frame);
+        }
+
         match frame.header.frame_type {
             Frametype::Open    => receiver::handle_open(&mut self.streams, self.role, stream_id)?,
             // Clone payload: the original stays in `frame` so the caller can inspect it.
@@ -202,10 +409,23 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
                 self.conn.send_frame(&pong).await?;
             }
 
-            // Pong, Settings, Hello, Welcome, Error: handled in a later phase.
-            Frametype::Pong |
-            Frametype::Settings | Frametype::Hello | Frametype::Welcome |
-            Frametype::Error => {}
+            Frametype::Hello => {
+                self.handle_hello(&frame).await?;
+            }
+
+            Frametype::Welcome => {
+                self.handle_welcome(&frame)?;
+            }
+
+            Frametype::Settings => {
+                self.handle_settings(&frame)?;
+            }
+
+            Frametype::Error => {
+                return self.handle_error(&frame);
+            }
+
+            Frametype::Pong => {}
         }
 
         Ok(frame)

@@ -7,7 +7,7 @@ use byteser_derive::ByteSerializable;
 use crate::server::dispatcher;
 
 use crate::{
-    errors::TransportError,
+    errors::{ErrorPayload, TransportError},
     frame::frame::Frametype,
     tcp::{connection::Connection, manager::{Role, StreamManager}},
 };
@@ -62,6 +62,18 @@ impl ResilientServer {
 
             let stream_id = frame.header.stream_id;
             match frame.header.frame_type {
+                Frametype::Hello => {
+                    println!("[server {}] received handshake Hello", peer);
+                    continue;
+                }
+                Frametype::Welcome => {
+                    println!("[server {}] received unexpected Welcome", peer);
+                    continue;
+                }
+                Frametype::Settings => {
+                    println!("[server {}] received connection settings", peer);
+                    continue;
+                }
                 Frametype::Open => {
                     println!("[server {}] stream {} opened", peer, stream_id);
                 }
@@ -87,6 +99,15 @@ impl ResilientServer {
                     manager.send_data(stream_id, response_payload).await?;
                     manager.close_stream(stream_id).await?;
                     manager.flush().await?;
+                }
+                Frametype::Error => {
+                    let error_payload = ErrorPayload::decode(&frame.payload)
+                        .map_err(|e| TransportError::InternalError(format!("Failed to decode error frame: {}", e)))?;
+                    return Err(TransportError::RemoteError(
+                        error_payload.error_code,
+                        error_payload.stream_id,
+                        error_payload.message,
+                    ).into());
                 }
                 _ => {
                     println!("[server {}] received unexpected frame type: {:?}", peer, frame.header.frame_type);
