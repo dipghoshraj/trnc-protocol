@@ -1,12 +1,13 @@
 //! Repeatable loopback benchmark for the TRNC transport protocol, gRPC, and REST.
 //!
-//! TLS is deliberately disabled for every transport. Each measured operation is a
-//! sequential echo request using a persistent client connection where the protocol
-//! supports it. The benchmark reports successful-operation throughput and latency.
+//! TLS is deliberately disabled for every transport. Each concurrent user owns a
+//! persistent client connection where the protocol supports it. The benchmark
+//! reports aggregate throughput and per-request latency.
 
 use std::{
     convert::Infallible,
     net::SocketAddr,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -16,6 +17,8 @@ use clap::{Parser, ValueEnum};
 use hdrhistogram::Histogram;
 use tokio::{
     net::{TcpListener, TcpStream},
+    sync::Barrier,
+    task::JoinSet,
     time::sleep,
 };
 use tonic::{Request, Response, Status, transport::Server};
@@ -30,7 +33,6 @@ use transport::{
 pub mod benchmark {
     tonic::include_proto!("benchmark");
 }
-
 use benchmark::{
     EchoRequest, EchoResponse,
     echo_client::EchoClient,
@@ -51,12 +53,15 @@ struct Args {
     /// Protocol to measure. `all` runs every implementation sequentially.
     #[arg(long, value_enum, default_value_t = Protocol::All)]
     protocol: Protocol,
-    /// Number of warm-up round trips per protocol; excluded from the result.
+    /// Number of warm-up round trips per concurrent user; excluded from the result.
     #[arg(long, default_value_t = 100)]
     warmup: u64,
-    /// Number of measured round trips per protocol.
+    /// Total number of measured round trips per protocol, divided between users.
     #[arg(long, default_value_t = 1_000)]
     requests: u64,
+    /// Number of independently connected users issuing requests concurrently.
+    #[arg(long, default_value_t = 1)]
+    concurrent_users: usize,
     /// Echo request payload size in bytes.
     #[arg(long, default_value_t = 256)]
     payload_bytes: usize,
@@ -74,21 +79,23 @@ struct Metrics {
 }
 
 impl Metrics {
-    fn print_table(&self, protocol: Protocol, payload_bytes: usize) {
+    fn print_table(&self, protocol: Protocol, payload_bytes: usize, concurrent_users: usize) {
         let ops_per_second = self.completed as f64 / self.elapsed.as_secs_f64();
         let elapsed_ms = self.elapsed.as_secs_f64() * 1_000.0;
-
-        println!("\n┌─────────────────────────────────────────────────────────────────────────────┐");
-        println!("│ 📊 Benchmark Result: {:?} Protocol", protocol);
+        println!(
+            "\n┌─────────────────────────────────────────────────────────────────────────────┐"
+        );
+        println!("│ 📊 Benchmark Result: {protocol:?} Protocol");
         println!("├─────────────────────────────────────────────────────────────────────────────┤");
         println!("│ Configuration:");
-        println!("│   • Payload Size:      {} bytes", payload_bytes);
+        println!("│   • Payload Size:      {payload_bytes} bytes");
+        println!("│   • Concurrent Users:  {concurrent_users}");
         println!("│   • Transport Layer:   TLS OFF");
         println!("├─────────────────────────────────────────────────────────────────────────────┤");
         println!("│ Performance Metrics:");
         println!("│   • Total Operations:  {}", self.completed);
-        println!("│   • Elapsed Time:      {:.3} ms", elapsed_ms);
-        println!("│   • Throughput:        {:.2} ops/sec", ops_per_second);
+        println!("│   • Elapsed Time:      {elapsed_ms:.3} ms");
+        println!("│   • Throughput:        {ops_per_second:.2} ops/sec");
         println!("├─────────────────────────────────────────────────────────────────────────────┤");
         println!("│ Latency Analysis (in microseconds):");
         println!("│   • Min:               {} µs", self.min_us);
@@ -97,61 +104,42 @@ impl Metrics {
         println!("│   • P99:               {} µs", self.p99_us);
         println!("│   • Max:               {} µs", self.max_us);
         println!("└─────────────────────────────────────────────────────────────────────────────┘");
-        
-        // Also print the raw RESULT line for logging/parsing
-        println!("\nRESULT protocol={protocol:?} tls=off payload_bytes={payload_bytes} operations={} elapsed_ms={:.3} ops_per_sec={:.2} latency_us_min={} latency_us_p50={} latency_us_p95={} latency_us_p99={} latency_us_max={}", 
-            self.completed, elapsed_ms, ops_per_second, self.min_us, self.p50_us, self.p95_us, self.p99_us, self.max_us);
+        println!(
+            "\nRESULT protocol={protocol:?} tls=off concurrent_users={concurrent_users} payload_bytes={payload_bytes} operations={} elapsed_ms={elapsed_ms:.3} ops_per_sec={ops_per_second:.2} latency_us_min={} latency_us_p50={} latency_us_p95={} latency_us_p99={} latency_us_max={}",
+            self.completed, self.min_us, self.p50_us, self.p95_us, self.p99_us, self.max_us
+        );
     }
 }
 
-fn print_comparison_table(results: &[(Protocol, Metrics)], _payload_bytes: usize) {
+fn print_comparison_table(results: &[(Protocol, Metrics)]) {
     println!("\n╔═════════════════════════════════════════════════════════════════════════════╗");
     println!("║                         COMPARISON TABLE                                    ║");
     println!("╠════════════╦════════════╦═══════════╦═════════════╦═════════╦═════════╦═════╣");
     println!("║ Protocol   ║  Ops/Sec   ║ Min (µs)  ║ P50 (µs)    ║ P95 (µs)║ P99 (µs)║Max  ║");
     println!("╠════════════╬════════════╬═══════════╬═════════════╬═════════╬═════════╬═════╣");
-    
-    let mut best_throughput = 0.0;
-    let mut best_protocol = "";
-    
+    let best = results
+        .iter()
+        .map(|(_, m)| m.completed as f64 / m.elapsed.as_secs_f64())
+        .fold(0.0, f64::max);
     for (protocol, metrics) in results {
-        let ops_per_second = metrics.completed as f64 / metrics.elapsed.as_secs_f64();
-        if ops_per_second > best_throughput {
-            best_throughput = ops_per_second;
-            best_protocol = match protocol {
-                Protocol::Trnc => "TRNC",
-                Protocol::Grpc => "gRPC",
-                Protocol::Rest => "REST",
-                Protocol::All => unreachable!(),
-            };
-        }
-        
-        let protocol_name = match protocol {
+        let ops = metrics.completed as f64 / metrics.elapsed.as_secs_f64();
+        let name = match protocol {
             Protocol::Trnc => "Trnc",
             Protocol::Grpc => "Grpc",
             Protocol::Rest => "Rest",
             Protocol::All => unreachable!(),
         };
-        
-        let marker = if (ops_per_second - best_throughput).abs() < 0.01 { "🏆" } else { "  " };
+        let marker = if (ops - best).abs() < 0.01 {
+            "🏆"
+        } else {
+            "  "
+        };
         println!(
-            "║ {:<9} {} ║ {:>10.2} ║ {:>9} ║ {:>11} ║ {:>7} ║ {:>7} ║ {:>4} ║",
-            protocol_name,
-            marker,
-            ops_per_second,
-            metrics.min_us,
-            metrics.p50_us,
-            metrics.p95_us,
-            metrics.p99_us,
-            metrics.max_us,
+            "║ {name:<9} {marker} ║ {ops:>10.2} ║ {:>9} ║ {:>11} ║ {:>7} ║ {:>7} ║ {:>4} ║",
+            metrics.min_us, metrics.p50_us, metrics.p95_us, metrics.p99_us, metrics.max_us
         );
     }
-    
     println!("╚════════════╩════════════╩═══════════╩═════════════╩═════════╩═════════╩═════╝");
-    println!("\n📈 Key Insights:");
-    println!("  • {} has the best throughput ({:.2} ops/sec) 🏆", best_protocol, best_throughput);
-    println!("  • All measurements performed on 127.0.0.1 (loopback) without TLS");
-    println!("  • Results are sequential (concurrency = 1)");
 }
 
 #[tokio::main]
@@ -160,37 +148,60 @@ async fn main() -> Result<()> {
     if args.requests == 0 {
         bail!("--requests must be greater than zero");
     }
+    if args.concurrent_users == 0 {
+        bail!("--concurrent-users must be greater than zero");
+    }
+    if args.concurrent_users as u64 > args.requests {
+        bail!("--concurrent-users cannot exceed --requests");
+    }
     if args.payload_bytes == 0 {
         bail!("--payload-bytes must be greater than zero");
     }
-
-    println!("\n🚀 TRNC Benchmark Suite - Performance Analysis");
-    println!("═══════════════════════════════════════════════════════════════════════════════");
-    println!("Configuration:");
-    println!("  • Warmup requests:    {}", args.warmup);
-    println!("  • Measured requests:  {}", args.requests);
-    println!("  • Payload size:       {} bytes", args.payload_bytes);
-    println!("  • TLS:                OFF");
-    println!("═══════════════════════════════════════════════════════════════════════════════\n");
-    
+    println!(
+        "\n🚀 TRNC Benchmark Suite - Performance Analysis\n═══════════════════════════════════════════════════════════════════════════════"
+    );
+    println!(
+        "Configuration:\n  • Warmup requests/user: {}\n  • Measured requests:   {}\n  • Concurrent users:    {}\n  • Payload size:        {} bytes\n  • TLS:                 OFF\n═══════════════════════════════════════════════════════════════════════════════",
+        args.warmup, args.requests, args.concurrent_users, args.payload_bytes
+    );
     let mut results = Vec::new();
-    
     for protocol in selected(args.protocol) {
         let metrics = match protocol {
-            Protocol::Trnc => measure_trnc(args.warmup, args.requests, args.payload_bytes).await?,
-            Protocol::Grpc => measure_grpc(args.warmup, args.requests, args.payload_bytes).await?,
-            Protocol::Rest => measure_rest(args.warmup, args.requests, args.payload_bytes).await?,
-            Protocol::All => unreachable!("all expands before measurement"),
+            Protocol::Trnc => {
+                measure_trnc(
+                    args.warmup,
+                    args.requests,
+                    args.concurrent_users,
+                    args.payload_bytes,
+                )
+                .await?
+            }
+            Protocol::Grpc => {
+                measure_grpc(
+                    args.warmup,
+                    args.requests,
+                    args.concurrent_users,
+                    args.payload_bytes,
+                )
+                .await?
+            }
+            Protocol::Rest => {
+                measure_rest(
+                    args.warmup,
+                    args.requests,
+                    args.concurrent_users,
+                    args.payload_bytes,
+                )
+                .await?
+            }
+            Protocol::All => unreachable!(),
         };
-        metrics.print_table(protocol, args.payload_bytes);
+        metrics.print_table(protocol, args.payload_bytes, args.concurrent_users);
         results.push((protocol, metrics));
     }
-
-    // Print comparison table if multiple protocols were run
     if results.len() > 1 {
-        print_comparison_table(&results, args.payload_bytes);
+        print_comparison_table(&results);
     }
-
     Ok(())
 }
 
@@ -200,16 +211,16 @@ fn selected(protocol: Protocol) -> Vec<Protocol> {
         protocol => vec![protocol],
     }
 }
-
 fn payload(size: usize) -> Vec<u8> {
     (0..size).map(|i| (i % 251) as u8).collect()
 }
-
+fn requests_for_user(total: u64, users: usize, user: usize) -> u64 {
+    total / users as u64 + u64::from(user < total as usize % users)
+}
 fn record(histogram: &mut Histogram<u64>, started: Instant) -> Result<()> {
     histogram.record(started.elapsed().as_micros().max(1) as u64)?;
     Ok(())
 }
-
 fn metrics(completed: u64, elapsed: Duration, histogram: Histogram<u64>) -> Metrics {
     Metrics {
         completed,
@@ -222,27 +233,57 @@ fn metrics(completed: u64, elapsed: Duration, histogram: Histogram<u64>) -> Metr
     }
 }
 
-async fn measure_trnc(warmup: u64, requests: u64, payload_size: usize) -> Result<Metrics> {
+async fn join_workers(
+    mut workers: JoinSet<Result<(u64, Histogram<u64>)>>,
+    started: Instant,
+) -> Result<Metrics> {
+    let mut completed = 0;
+    let mut combined = Histogram::<u64>::new(3)?;
+    while let Some(worker) = workers.join_next().await {
+        let (count, histogram) = worker.context("benchmark worker task failed")??;
+        completed += count;
+        combined.add(&histogram)?;
+    }
+    Ok(metrics(completed, started.elapsed(), combined))
+}
+
+async fn measure_trnc(
+    warmup: u64,
+    requests: u64,
+    users: usize,
+    payload_size: usize,
+) -> Result<Metrics> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     let server = tokio::spawn(trnc_server(listener));
-    let tcp = TcpStream::connect(addr).await?;
-    let mut client = StreamManager::new(Connection::new(tcp), Role::Initiator);
-    client.start_handshake().await?;
     let body = payload(payload_size);
-    for _ in 0..warmup {
-        trnc_round_trip(&mut client, &body).await?;
+    let mut workers = JoinSet::new();
+    let ready = Arc::new(Barrier::new(users + 1));
+    for user in 0..users {
+        let body = body.clone();
+        let ready = Arc::clone(&ready);
+        workers.spawn(async move {
+            let tcp = TcpStream::connect(addr).await?;
+            let mut client = StreamManager::new(Connection::new(tcp), Role::Initiator);
+            client.start_handshake().await?;
+            for _ in 0..warmup {
+                trnc_round_trip(&mut client, &body).await?;
+            }
+            ready.wait().await;
+            let mut histogram = Histogram::<u64>::new(3)?;
+            for _ in 0..requests_for_user(requests, users, user) {
+                let operation = Instant::now();
+                trnc_round_trip(&mut client, &body).await?;
+                record(&mut histogram, operation)?;
+            }
+            Ok((requests_for_user(requests, users, user), histogram))
+        });
     }
+    ready.wait().await;
     let started = Instant::now();
-    let mut histogram = Histogram::<u64>::new(3)?;
-    for _ in 0..requests {
-        let operation = Instant::now();
-        trnc_round_trip(&mut client, &body).await?;
-        record(&mut histogram, operation)?;
-    }
-    drop(client);
-    server.await.context("TRNC server task failed")??;
-    Ok(metrics(requests, started.elapsed(), histogram))
+    let result = join_workers(workers, started).await;
+    server.abort();
+    result
 }
 
 async fn trnc_round_trip(client: &mut StreamManager<TcpStream>, body: &[u8]) -> Result<()> {
@@ -260,9 +301,17 @@ async fn trnc_round_trip(client: &mut StreamManager<TcpStream>, body: &[u8]) -> 
         }
     }
 }
-
 async fn trnc_server(listener: TcpListener) -> Result<()> {
-    let (tcp, _) = listener.accept().await?;
+    loop {
+        let (tcp, _) = listener.accept().await?;
+        tokio::spawn(async move {
+            if let Err(error) = trnc_connection(tcp).await {
+                eprintln!("TRNC connection failed: {error}");
+            }
+        });
+    }
+}
+async fn trnc_connection(tcp: TcpStream) -> Result<()> {
     let mut server = StreamManager::new(Connection::new(tcp), Role::Acceptor);
     loop {
         let frame = match server.recv_frame().await {
@@ -285,7 +334,6 @@ async fn trnc_server(listener: TcpListener) -> Result<()> {
 
 #[derive(Default)]
 struct GrpcEcho;
-
 #[tonic::async_trait]
 impl Echo for GrpcEcho {
     async fn echo(&self, request: Request<EchoRequest>) -> Result<Response<EchoResponse>, Status> {
@@ -294,8 +342,12 @@ impl Echo for GrpcEcho {
         }))
     }
 }
-
-async fn measure_grpc(warmup: u64, requests: u64, payload_size: usize) -> Result<Metrics> {
+async fn measure_grpc(
+    warmup: u64,
+    requests: u64,
+    users: usize,
+    payload_size: usize,
+) -> Result<Metrics> {
     let addr = reserve_addr().await?;
     let server = tokio::spawn(async move {
         Server::builder()
@@ -304,23 +356,35 @@ async fn measure_grpc(warmup: u64, requests: u64, payload_size: usize) -> Result
             .await
             .context("gRPC server failed")
     });
-    let endpoint = format!("http://{addr}"); // h2c: TLS intentionally disabled.
-    let mut client = connect_grpc(&endpoint).await?;
+    let endpoint = format!("http://{addr}");
     let body = payload(payload_size);
-    for _ in 0..warmup {
-        grpc_round_trip(&mut client, &body).await?;
+    let mut workers = JoinSet::new();
+    let ready = Arc::new(Barrier::new(users + 1));
+    for user in 0..users {
+        let endpoint = endpoint.clone();
+        let body = body.clone();
+        let ready = Arc::clone(&ready);
+        workers.spawn(async move {
+            let mut client = connect_grpc(&endpoint).await?;
+            for _ in 0..warmup {
+                grpc_round_trip(&mut client, &body).await?;
+            }
+            ready.wait().await;
+            let mut histogram = Histogram::<u64>::new(3)?;
+            for _ in 0..requests_for_user(requests, users, user) {
+                let operation = Instant::now();
+                grpc_round_trip(&mut client, &body).await?;
+                record(&mut histogram, operation)?;
+            }
+            Ok((requests_for_user(requests, users, user), histogram))
+        });
     }
+    ready.wait().await;
     let started = Instant::now();
-    let mut histogram = Histogram::<u64>::new(3)?;
-    for _ in 0..requests {
-        let operation = Instant::now();
-        grpc_round_trip(&mut client, &body).await?;
-        record(&mut histogram, operation)?;
-    }
+    let result = join_workers(workers, started).await;
     server.abort();
-    Ok(metrics(requests, started.elapsed(), histogram))
+    result
 }
-
 async fn connect_grpc(endpoint: &str) -> Result<EchoClient<tonic::transport::Channel>> {
     for _ in 0..100 {
         match EchoClient::connect(endpoint.to_owned()).await {
@@ -330,7 +394,6 @@ async fn connect_grpc(endpoint: &str) -> Result<EchoClient<tonic::transport::Cha
     }
     bail!("gRPC server did not become ready")
 }
-
 async fn grpc_round_trip(
     client: &mut EchoClient<tonic::transport::Channel>,
     body: &[u8],
@@ -347,7 +410,12 @@ async fn grpc_round_trip(
     Ok(())
 }
 
-async fn measure_rest(warmup: u64, requests: u64, payload_size: usize) -> Result<Metrics> {
+async fn measure_rest(
+    warmup: u64,
+    requests: u64,
+    users: usize,
+    payload_size: usize,
+) -> Result<Metrics> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     let server = tokio::spawn(async move {
@@ -355,27 +423,38 @@ async fn measure_rest(warmup: u64, requests: u64, payload_size: usize) -> Result
             .await
             .context("REST server failed")
     });
-    let client = reqwest::Client::builder().build()?;
-    let url = format!("http://{addr}/echo"); // HTTP: TLS intentionally disabled.
+    let url = format!("http://{addr}/echo");
     let body = payload(payload_size);
-    for _ in 0..warmup {
-        rest_round_trip(&client, &url, &body).await?;
+    let mut workers = JoinSet::new();
+    let ready = Arc::new(Barrier::new(users + 1));
+    for user in 0..users {
+        let url = url.clone();
+        let body = body.clone();
+        let ready = Arc::clone(&ready);
+        workers.spawn(async move {
+            let client = reqwest::Client::builder().build()?;
+            for _ in 0..warmup {
+                rest_round_trip(&client, &url, &body).await?;
+            }
+            ready.wait().await;
+            let mut histogram = Histogram::<u64>::new(3)?;
+            for _ in 0..requests_for_user(requests, users, user) {
+                let operation = Instant::now();
+                rest_round_trip(&client, &url, &body).await?;
+                record(&mut histogram, operation)?;
+            }
+            Ok((requests_for_user(requests, users, user), histogram))
+        });
     }
+    ready.wait().await;
     let started = Instant::now();
-    let mut histogram = Histogram::<u64>::new(3)?;
-    for _ in 0..requests {
-        let operation = Instant::now();
-        rest_round_trip(&client, &url, &body).await?;
-        record(&mut histogram, operation)?;
-    }
+    let result = join_workers(workers, started).await;
     server.abort();
-    Ok(metrics(requests, started.elapsed(), histogram))
+    result
 }
-
 async fn rest_echo(body: Bytes) -> Result<Bytes, Infallible> {
     Ok(body)
 }
-
 async fn rest_round_trip(client: &reqwest::Client, url: &str, body: &[u8]) -> Result<()> {
     let response = client
         .post(url)
@@ -389,7 +468,6 @@ async fn rest_round_trip(client: &reqwest::Client, url: &str, body: &[u8]) -> Re
     }
     Ok(())
 }
-
 async fn reserve_addr() -> Result<SocketAddr> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     Ok(listener.local_addr()?)
