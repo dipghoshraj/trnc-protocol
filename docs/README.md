@@ -34,6 +34,7 @@ one place.
 | [`manager.md`](manager.md) | `tcp::manager::StreamManager<T>`: the crate's primary public API — multiplexing, stream IDs, auto-flush, public methods |
 | [`receiver.md`](receiver.md) | `tcp::receiver`: stateless handler functions that mutate stream state for each inbound frame type |
 | [`resilient.md`](resilient.md) | `client::resilient_client::ResilientClient`, `server::ResilientServer`, `Dispatcher`, `Actions`/`Handler`: the request/response layer built on top of `StreamManager` |
+| [`performance-benchmark.md`](performance-benchmark.md) | Repeatable TLS-off loopback comparison of TRNC, gRPC, and REST |
 
 Read `architecture.md` first for the big picture, then drill into the module
 you care about. This file is the map between them plus the parts (the

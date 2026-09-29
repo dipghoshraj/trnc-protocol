@@ -169,6 +169,16 @@ See [INTERFACE_GUIDE.md](INTERFACE_GUIDE.md#extending-with-custom-handlers) for 
 
 Plus 20 transport protocol commits cherry-picked from trench-db repository.
 
+## 📈 Performance benchmarking
+
+A repeatable loopback echo benchmark compares TRNC with clear-text gRPC and REST. TLS is disabled for every implementation, and the runner reports throughput plus min/p50/p95/p99/max round-trip latency.
+
+```bash
+cargo run --release --manifest-path benchmarks/Cargo.toml -- --protocol all
+```
+
+See [docs/performance-benchmark.md](docs/performance-benchmark.md) for the methodology, metric definitions, and reproducible result-capture command.
+
 ## 🧪 Testing
 
 Run tests with:
