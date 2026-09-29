@@ -1,0 +1,22 @@
+[package]
+name = "transport-benchmarks"
+version = "0.1.0"
+edition = "2024"
+description = "Repeatable loopback benchmarks for TRNC, gRPC, and REST without TLS"
+publish = false
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+bytes = "1"
+clap = { version = "4.5", features = ["derive"] }
+hdrhistogram = "7"
+prost = "0.14"
+reqwest = { version = "0.12", default-features = false }
+tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread", "time"] }
+tonic = { version = "0.14", features = ["transport"] }
+tonic-prost = "0.14"
+transport = { path = "../transport" }
+
+[build-dependencies]
+tonic-prost-build = "0.14"

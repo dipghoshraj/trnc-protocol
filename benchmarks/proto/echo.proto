@@ -1,0 +1,9 @@
+syntax = "proto3";
+package benchmark;
+
+service Echo {
+  rpc Echo (EchoRequest) returns (EchoResponse);
+}
+
+message EchoRequest { bytes payload = 1; }
+message EchoResponse { bytes payload = 1; }
