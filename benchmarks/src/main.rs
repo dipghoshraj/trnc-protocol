@@ -74,20 +74,84 @@ struct Metrics {
 }
 
 impl Metrics {
-    fn print(&self, protocol: Protocol, payload_bytes: usize) {
+    fn print_table(&self, protocol: Protocol, payload_bytes: usize) {
         let ops_per_second = self.completed as f64 / self.elapsed.as_secs_f64();
+        let elapsed_ms = self.elapsed.as_secs_f64() * 1_000.0;
+
+        println!("\n┌─────────────────────────────────────────────────────────────────────────────┐");
+        println!("│ 📊 Benchmark Result: {:?} Protocol", protocol);
+        println!("├─────────────────────────────────────────────────────────────────────────────┤");
+        println!("│ Configuration:");
+        println!("│   • Payload Size:      {} bytes", payload_bytes);
+        println!("│   • Transport Layer:   TLS OFF");
+        println!("├─────────────────────────────────────────────────────────────────────────────┤");
+        println!("│ Performance Metrics:");
+        println!("│   • Total Operations:  {}", self.completed);
+        println!("│   • Elapsed Time:      {:.3} ms", elapsed_ms);
+        println!("│   • Throughput:        {:.2} ops/sec", ops_per_second);
+        println!("├─────────────────────────────────────────────────────────────────────────────┤");
+        println!("│ Latency Analysis (in microseconds):");
+        println!("│   • Min:               {} µs", self.min_us);
+        println!("│   • P50 (Median):      {} µs", self.p50_us);
+        println!("│   • P95:               {} µs", self.p95_us);
+        println!("│   • P99:               {} µs", self.p99_us);
+        println!("│   • Max:               {} µs", self.max_us);
+        println!("└─────────────────────────────────────────────────────────────────────────────┘");
+        
+        // Also print the raw RESULT line for logging/parsing
+        println!("\nRESULT protocol={protocol:?} tls=off payload_bytes={payload_bytes} operations={} elapsed_ms={:.3} ops_per_sec={:.2} latency_us_min={} latency_us_p50={} latency_us_p95={} latency_us_p99={} latency_us_max={}", 
+            self.completed, elapsed_ms, ops_per_second, self.min_us, self.p50_us, self.p95_us, self.p99_us, self.max_us);
+    }
+}
+
+fn print_comparison_table(results: &[(Protocol, Metrics)], _payload_bytes: usize) {
+    println!("\n╔═════════════════════════════════════════════════════════════════════════════╗");
+    println!("║                         COMPARISON TABLE                                    ║");
+    println!("╠════════════╦════════════╦═══════════╦═════════════╦═════════╦═════════╦═════╣");
+    println!("║ Protocol   ║  Ops/Sec   ║ Min (µs)  ║ P50 (µs)    ║ P95 (µs)║ P99 (µs)║Max  ║");
+    println!("╠════════════╬════════════╬═══════════╬═════════════╬═════════╬═════════╬═════╣");
+    
+    let mut best_throughput = 0.0;
+    let mut best_protocol = "";
+    
+    for (protocol, metrics) in results {
+        let ops_per_second = metrics.completed as f64 / metrics.elapsed.as_secs_f64();
+        if ops_per_second > best_throughput {
+            best_throughput = ops_per_second;
+            best_protocol = match protocol {
+                Protocol::Trnc => "TRNC",
+                Protocol::Grpc => "gRPC",
+                Protocol::Rest => "REST",
+                Protocol::All => unreachable!(),
+            };
+        }
+        
+        let protocol_name = match protocol {
+            Protocol::Trnc => "Trnc",
+            Protocol::Grpc => "Grpc",
+            Protocol::Rest => "Rest",
+            Protocol::All => unreachable!(),
+        };
+        
+        let marker = if (ops_per_second - best_throughput).abs() < 0.01 { "🏆" } else { "  " };
         println!(
-            "RESULT protocol={protocol:?} tls=off payload_bytes={payload_bytes} operations={} elapsed_ms={:.3} ops_per_sec={:.2} latency_us_min={} latency_us_p50={} latency_us_p95={} latency_us_p99={} latency_us_max={}",
-            self.completed,
-            self.elapsed.as_secs_f64() * 1_000.0,
+            "║ {:<9} {} ║ {:>10.2} ║ {:>9} ║ {:>11} ║ {:>7} ║ {:>7} ║ {:>4} ║",
+            protocol_name,
+            marker,
             ops_per_second,
-            self.min_us,
-            self.p50_us,
-            self.p95_us,
-            self.p99_us,
-            self.max_us,
+            metrics.min_us,
+            metrics.p50_us,
+            metrics.p95_us,
+            metrics.p99_us,
+            metrics.max_us,
         );
     }
+    
+    println!("╚════════════╩════════════╩═══════════╩═════════════╩═════════╩═════════╩═════╝");
+    println!("\n📈 Key Insights:");
+    println!("  • {} has the best throughput ({:.2} ops/sec) 🏆", best_protocol, best_throughput);
+    println!("  • All measurements performed on 127.0.0.1 (loopback) without TLS");
+    println!("  • Results are sequential (concurrency = 1)");
 }
 
 #[tokio::main]
@@ -100,10 +164,17 @@ async fn main() -> Result<()> {
         bail!("--payload-bytes must be greater than zero");
     }
 
-    println!(
-        "CONFIG tls=off warmup={} requests={} payload_bytes={}",
-        args.warmup, args.requests, args.payload_bytes
-    );
+    println!("\n🚀 TRNC Benchmark Suite - Performance Analysis");
+    println!("═══════════════════════════════════════════════════════════════════════════════");
+    println!("Configuration:");
+    println!("  • Warmup requests:    {}", args.warmup);
+    println!("  • Measured requests:  {}", args.requests);
+    println!("  • Payload size:       {} bytes", args.payload_bytes);
+    println!("  • TLS:                OFF");
+    println!("═══════════════════════════════════════════════════════════════════════════════\n");
+    
+    let mut results = Vec::new();
+    
     for protocol in selected(args.protocol) {
         let metrics = match protocol {
             Protocol::Trnc => measure_trnc(args.warmup, args.requests, args.payload_bytes).await?,
@@ -111,8 +182,15 @@ async fn main() -> Result<()> {
             Protocol::Rest => measure_rest(args.warmup, args.requests, args.payload_bytes).await?,
             Protocol::All => unreachable!("all expands before measurement"),
         };
-        metrics.print(protocol, args.payload_bytes);
+        metrics.print_table(protocol, args.payload_bytes);
+        results.push((protocol, metrics));
     }
+
+    // Print comparison table if multiple protocols were run
+    if results.len() > 1 {
+        print_comparison_table(&results, args.payload_bytes);
+    }
+
     Ok(())
 }
 
