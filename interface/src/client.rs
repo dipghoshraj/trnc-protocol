@@ -4,6 +4,7 @@ use byteser::ByteSerializable;
 use byteser_derive::ByteSerializable;
 use transport::client::resilient_client::ResilientClient;
 use transport::server::RequestEnvelope;
+use transport::tls::endpoint::ClientTls;
 
 #[derive(Debug, ByteSerializable)]
 struct UserMessage {
@@ -22,11 +23,15 @@ struct User {
     age: u32,
 }
 
-pub async fn resilient_client_run(addr: SocketAddr, message: String) -> Result<(), Box<dyn Error>> {
+pub async fn resilient_client_run(
+    addr: SocketAddr,
+    message: String,
+    tls: ClientTls,
+) -> Result<(), Box<dyn Error>> {
     let host = addr.ip().to_string();
     let port = addr.port();
 
-    let mut client = ResilientClient::new(host, port);
+    let mut client = ResilientClient::new(host, port, tls);
     client.build_stream().await?;
     println!("[client] connected to {addr}");
 

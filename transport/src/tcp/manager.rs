@@ -4,10 +4,16 @@ use crate::tcp::connection::Connection;
 use crate::tcp::stream::{Stream, StreamState};
 use crate::tcp::receiver;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use crate::frame::{frame::Frametype, frame::Frame, header::{FLAG_FIN, FLAG_CONTROL, MAX_FRAME_SIZE}};
 use crate::errors::{ErrorCode, ErrorPayload, TransportError};
+use crate::tls::credential::now_unix_secs;
+use crate::tls::hello;
+use crate::tls::identity::{NodeIdentity, PeerIdentity};
+use crate::tls::trust_cache::TrustCache;
+use crate::tls::verifier::authorize_credential;
 use bytes::Bytes;
 
 const FLUSH_THRESHOLD: usize = 32 * 1024;
@@ -28,23 +34,53 @@ pub enum HandshakeState {
     Established,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Application-level authentication for the `Hello` exchange.
+///
+/// Both sides must derive `session_secret` from the same TLS session (see
+/// [`hello::session_secret`]). The initiator signs it with its node key. The acceptor checks
+/// that signature against the initiator's credential.
+#[derive(Debug, Clone)]
+pub struct SessionAuth {
+    pub identity: Arc<NodeIdentity>,
+    pub trust_cache: Arc<dyn TrustCache>,
+    pub session_secret: [u8; hello::SESSION_SECRET_LEN],
+    /// Identity of the peer as verified during the TLS handshake, if known.
+    pub tls_peer: Option<PeerIdentity>,
+}
+
+#[derive(Debug, Clone)]
 pub struct StreamManager<T> {
     conn: Connection<T>,
     streams: HashMap<u32, Stream>,
     next_local_id: u32,
     role: Role,
     handshake_state: HandshakeState,
+    auth: Option<SessionAuth>,
+    peer_identity: Option<PeerIdentity>,
 }
 
 impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
+    /// Creates a manager without application-level authentication.
+    ///
+    /// The `Hello` frame carries no credential. The acceptor accepts any `Hello`. Use this for
+    /// plain TCP only.
     pub fn new(conn: Connection<T>, role: Role) -> Self {
+        Self::build(conn, role, None)
+    }
+
+    /// Creates a manager that authenticates the peer during the `Hello` exchange.
+    pub fn with_auth(conn: Connection<T>, role: Role, auth: SessionAuth) -> Self {
+        Self::build(conn, role, Some(auth))
+    }
+
+    fn build(conn: Connection<T>, role: Role, auth: Option<SessionAuth>) -> Self {
 
         let next_local_id = match role {
             Role::Initiator => 1,
             Role::Acceptor  => 2,
         };
 
+        let peer_identity = auth.as_ref().and_then(|a| a.tls_peer.clone());
 
         Self {
             conn,
@@ -52,12 +88,22 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
             next_local_id,
             role,
             handshake_state: HandshakeState::AwaitingHello,
+            auth,
+            peer_identity,
         }
     }
 
     /// Returns the current connection handshake state.
     pub fn handshake_state(&self) -> HandshakeState {
         self.handshake_state
+    }
+
+    /// Returns the verified identity of the remote peer, once known.
+    ///
+    /// On the initiator this is the server's TLS identity. On the acceptor it is the initiator's
+    /// credential from `Hello`.
+    pub fn peer_identity(&self) -> Option<&PeerIdentity> {
+        self.peer_identity.as_ref()
     }
 
     /// Begin the connection handshake from the initiator side.
@@ -103,7 +149,14 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
             return Ok(());
         }
 
-        let hello = Frame::empty(Frametype::Hello, FLAG_CONTROL, 0);
+        let payload = match &self.auth {
+            Some(auth) => {
+                let proof = auth.identity.sign(&auth.session_secret);
+                hello::encode_hello(auth.identity.credential(), &proof)?
+            }
+            None => Vec::new(),
+        };
+        let hello = Frame::new(Frametype::Hello, FLAG_CONTROL, 0, payload);
         self.conn.send_frame(&hello).await?;
         self.handshake_state = HandshakeState::AwaitingWelcome;
         Ok(())
@@ -154,6 +207,20 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
             return Err(TransportError::InvalidFrame(
                 "unexpected Hello frame".into(),
             ));
+        }
+
+        if let Some(auth) = &self.auth {
+            match verify_peer_hello(auth, &frame.payload) {
+                Ok(peer) => self.peer_identity = Some(peer),
+                Err(err) => {
+                    let message = "peer authentication failed".to_string();
+                    self.fail_handshake(message.clone()).await?;
+                    return Err(TransportError::HandshakeRejected {
+                        code: ErrorCode::HandshakeRejected,
+                        message: format!("{message}: {err}"),
+                    });
+                }
+            }
         }
 
         self.send_welcome().await
@@ -430,4 +497,18 @@ impl <T: AsyncRead + AsyncWrite + Unpin> StreamManager<T> {
 
         Ok(frame)
     }
+}
+
+/// Verifies an initiator's `Hello` payload against the acceptor's `SessionAuth`.
+///
+/// The proof is checked before the credential is authorized, so a credential is never cached
+/// unless the peer also proved possession of its key.
+fn verify_peer_hello(auth: &SessionAuth, payload: &[u8]) -> Result<PeerIdentity, TransportError> {
+    let (credential, proof) = hello::decode_hello(payload)?;
+    credential.verify_possession(&auth.session_secret, &proof)?;
+    authorize_credential(&credential, auth.trust_cache.as_ref(), now_unix_secs())?;
+    Ok(PeerIdentity {
+        node_id: credential.node_id,
+        cert_fingerprint: None,
+    })
 }

@@ -166,7 +166,7 @@ Wraps any `T: AsyncRead + AsyncWrite + Unpin`. Both buffers are allocated at `MI
 
 `T` must implement `AsyncRead + AsyncWrite + Unpin`. In production this is `tokio::net::TcpStream`. For tests, `tokio::io::duplex` creates a pair of in-memory streams that satisfy the same bounds, allowing full round-trip testing without a network.
 
-The TLS layer (planned) will slot in here: `rustls`'s async wrapper also implements `AsyncRead + AsyncWrite + Unpin`, so no changes to `Connection` are required when TLS is added.
+TLS is layered below `Connection` the same way: `tokio-rustls`'s stream implements `AsyncRead + AsyncWrite + Unpin`, so `Connection` needed no changes when TLS was added.
 
 ---
 

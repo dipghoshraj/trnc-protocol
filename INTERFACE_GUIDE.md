@@ -9,7 +9,12 @@ Implemented a comprehensive testing interface for the transport protocol based o
 - **`transport/src/frame/decoder.rs`**: Deserialize frame bytes to Frame objects
 - **`transport/src/frame/encoder.rs`**: Serialize Frame objects to bytes
 - **`transport/src/frame/mod.rs`**: Frame module exports and organization
-- **`transport/src/tls/client.rs`**: TLS client implementation
+- **`transport/src/tls/endpoint.rs`**: `ClientTls` and `ServerTls` entry points
+- **`transport/src/tls/credential.rs`**: Node credentials and Ed25519 key handling
+- **`transport/src/tls/identity.rs`**: Node identity and self-signed TLS certificate
+- **`transport/src/tls/verifier.rs`**: Peer certificate verification
+- **`transport/src/tls/hello.rs`**: Application-level `Hello` authentication
+- **`transport/src/tls/server_config.rs`** / **`client_config.rs`**: rustls configuration
 - **`transport/src/tls/mod.rs`**: TLS module exports
 - **`transport/src/tls/pem.rs`**: PEM certificate handling
 - **`transport/src/errors.rs`**: TransportError type definitions
@@ -38,11 +43,23 @@ The transport layer uses a binary frame protocol for efficient message delivery:
 - **Header Format**: Contains frame type and payload length information
 
 ### TLS Support
-Secure communication via rustls:
-- **Client TLS**: Encrypted outbound connections
-- **PEM Handling**: Certificate and key management
+Every connection is protected by TLS 1.3 with mutual authentication:
+- **Node credentials**: Each node holds an Ed25519 credential signed by a trusted issuer
+- **Mutual checks**: Both peers must present a credential that chains to a trusted issuer
+- **Application handshake**: The `Hello` exchange re-verifies both credentials and proves key possession
 - **Transparent**: TLS wraps TCP connections without protocol changes
 - **Async**: Full async support via tokio-rustls
+
+### TLS Identity Files
+The interface binaries take three flags. All are required:
+
+| Flag | Contents |
+|------|----------|
+| `--credential <file>` | Encoded node credential (`NodeCredential::encode()` bytes) |
+| `--key <file>` | The node's Ed25519 private key, PKCS#8 DER |
+| `--trusted-issuer <file>` | Raw 32-byte Ed25519 public key of a trusted issuer. Repeat the flag for more issuers. |
+
+The credential and key must belong to the same Ed25519 key pair. Nothing in this repository issues credentials yet, so the files come from your issuer tooling.
 
 ### Data Structures
 ```rust
@@ -84,18 +101,18 @@ cargo build --release
 ```
 
 ### 2. Run the Server
-Start the server on default address `127.0.0.1:5000`:
+Start the server on default address `127.0.0.1:5000` with its identity files:
 ```bash
-cargo run --bin server
+cargo run --bin server -- --credential server.cred --key server.key --trusted-issuer issuer.pub
 # Or with custom address:
-cargo run --bin server -- --addr 127.0.0.1:8080
+cargo run --bin server -- --addr 127.0.0.1:8080 --credential server.cred --key server.key --trusted-issuer issuer.pub
 ```
 
 ### 3. Run the Client (in another terminal)
 ```bash
-cargo run --bin client
+cargo run --bin client -- --credential client.cred --key client.key --trusted-issuer issuer.pub
 # Or with custom parameters:
-cargo run --bin client -- --addr 127.0.0.1:8080 --message "Your message here"
+cargo run --bin client -- --addr 127.0.0.1:8080 --message "Your message here" --credential client.cred --key client.key --trusted-issuer issuer.pub
 ```
 
 ### Expected Output
@@ -165,12 +182,12 @@ cargo run --bin client -- --addr 127.0.0.1:8080 --message "Your message here"
 
 ### Custom Server Address
 ```bash
-cargo run --bin server -- --addr 0.0.0.0:8080
+cargo run --bin server -- --addr 0.0.0.0:8080 --credential server.cred --key server.key --trusted-issuer issuer.pub
 ```
 
 ### Custom Client Parameters
 ```bash
-cargo run --bin client -- --addr 192.168.1.100:5000 --message "Custom message"
+cargo run --bin client -- --addr 192.168.1.100:5000 --message "Custom message" --credential client.cred --key client.key --trusted-issuer issuer.pub
 ```
 
 ### Environment-based Configuration
@@ -183,7 +200,7 @@ cargo run --bin server
 ## Troubleshooting
 
 ### Connection Refused
-- Ensure server is running: `cargo run --bin server`
+- Ensure server is running: `cargo run --bin server -- --credential server.cred --key server.key --trusted-issuer issuer.pub`
 - Check address and port: Default is `127.0.0.1:5000`
 - Verify firewall allows TCP connections
 
@@ -193,9 +210,11 @@ cargo run --bin server
 - Review byteser documentation for custom serialization
 
 ### TLS Connection Issues
-- Verify certificates are in correct PEM format
-- Check certificate paths are accessible
-- Ensure CA certificates are properly configured
+- `Untrusted peer`: the other node's credential was not issued by an issuer listed in `--trusted-issuer`
+- `certificate public key does not match credential`: the TLS certificate was not produced by the key in the credential, which usually means a copied or spoofed certificate
+- `CredentialExpired` / `certificate expired`: re-issue the credential; it is valid only before `expires_at`
+- `received fatal alert: HandshakeFailure` on the server: the client rejected the server or sent no valid credential
+- Check that `--credential` and `--key` belong to the same Ed25519 key pair
 
 ### Timeout Issues
 - Increase Tokio runtime timeout settings

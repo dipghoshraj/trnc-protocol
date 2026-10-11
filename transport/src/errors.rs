@@ -121,7 +121,15 @@ pub enum TransportError {
     FrameTooLarge { size: usize, max: usize },
     /// The underlying I/O stream was closed by the remote peer.
     ConnectionClosed,
-    // TlsError(rustls::Error),
+    /// A TLS-layer failure (handshake, certificate parsing, or verification).
+    TlsError(rustls::Error),
+    /// The peer's node identity is not present in the trust cache and could not be
+    /// validated against a trusted issuer.
+    UntrustedPeer(uuid::Uuid),
+    /// A node credential is structurally invalid, has a bad signature, or fails a check.
+    InvalidCredential(String),
+    /// A node credential has expired.
+    CredentialExpired(uuid::Uuid),
     /// An operation targeted a stream that has already been closed.
     StreamClosed(u32),
     /// The identified stream was reset by the remote peer.
@@ -165,7 +173,10 @@ impl std::fmt::Display for TransportError {
             TransportError::InvalidFrame(msg) => write!(f, "Invalid frame: {}", msg),
             TransportError::FrameTooLarge { size, max } => write!(f, "Frame too large: size {}, max {}", size, max),
             TransportError::ConnectionClosed => write!(f, "Connection closed"),
-            // TransportError::TlsError(e) => write!(f, "TLS error: {}", e),
+            TransportError::TlsError(e) => write!(f, "TLS error: {}", e),
+            TransportError::UntrustedPeer(id) => write!(f, "Untrusted peer: node {}", id),
+            TransportError::InvalidCredential(msg) => write!(f, "Invalid node credential: {}", msg),
+            TransportError::CredentialExpired(id) => write!(f, "Node credential expired: node {}", id),
             TransportError::StreamClosed(id) => write!(f, "Stream {} is closed", id),
             TransportError::StreamReset(id) => write!(f, "Stream {} was reset by remote", id),
             TransportError::FlowControlViolation { stream_id } => write!(f, "Flow control violation on stream {}", stream_id),
@@ -188,6 +199,7 @@ impl std::error::Error for TransportError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             TransportError::Io(e) => Some(e),
+            TransportError::TlsError(e) => Some(e),
             _ => None,
         }
     }

@@ -48,15 +48,16 @@ cargo build --release
 ```
 
 ### Run Server
+Each node needs three identity files (see [INTERFACE_GUIDE.md](INTERFACE_GUIDE.md#tls-identity-files)): its node credential, its PKCS#8 Ed25519 private key, and the public key of each issuer it trusts.
 ```bash
 cd interface
-cargo run --bin server -- --addr 127.0.0.1:5000
+cargo run --bin server -- --addr 127.0.0.1:5000 --credential server.cred --key server.key --trusted-issuer issuer.pub
 ```
 
 ### Run Client (in another terminal)
 ```bash
 cd interface
-cargo run --bin client -- --addr 127.0.0.1:5000 --message "Hello Protocol"
+cargo run --bin client -- --addr 127.0.0.1:5000 --message "Hello Protocol" --credential client.cred --key client.key --trusted-issuer issuer.pub
 ```
 
 ### Expected Output
