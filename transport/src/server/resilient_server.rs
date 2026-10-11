@@ -9,13 +9,15 @@ use crate::server::dispatcher;
 use crate::{
     errors::{ErrorPayload, TransportError},
     frame::frame::Frametype,
-    tcp::{connection::Connection, manager::{Role, StreamManager}},
+    tcp::{connection::Connection, manager::{Role, SessionAuth, StreamManager}},
+    tls::{endpoint::ServerTls, hello::session_secret},
 };
 
 pub struct ResilientServer {
     stream: TcpStream,
     peer: SocketAddr,
     actions: Arc<Actions>,
+    tls: ServerTls,
 }
 
 #[derive(ByteSerializable)]
@@ -32,8 +34,8 @@ pub struct ResponseEnvelope {
 
 
 impl ResilientServer {
-    pub fn new(stream: TcpStream, peer: SocketAddr, actions: Arc<Actions>) -> Self {
-        ResilientServer { stream, peer, actions }
+    pub fn new(stream: TcpStream, peer: SocketAddr, actions: Arc<Actions>, tls: ServerTls) -> Self {
+        ResilientServer { stream, peer, actions, tls }
     }
 
     pub async fn handle_request(
@@ -46,9 +48,21 @@ impl ResilientServer {
     }
 
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut manager = StreamManager::new(Connection::new(self.stream), Role::Acceptor);
         let peer = self.peer;
         let dispatcher = dispatcher::Dispatcher::new(self.actions.clone());
+
+        let tls_stream = self.tls.acceptor.accept(self.stream).await?;
+        let secret = {
+            let (_, conn) = tls_stream.get_ref();
+            session_secret(&**conn, &self.tls.identity.node_id())?
+        };
+        let auth = SessionAuth {
+            identity: self.tls.identity.clone(),
+            trust_cache: self.tls.trust_cache.clone(),
+            session_secret: secret,
+            tls_peer: None,
+        };
+        let mut manager = StreamManager::with_auth(Connection::new(tls_stream), Role::Acceptor, auth);
 
         loop {
             let frame = match manager.recv_frame().await {
@@ -126,6 +140,8 @@ mod tests {
     use super::{RequestEnvelope, ResponseEnvelope};
     use crate::client::resilient_client::ResilientClient;
     use crate::errors::TransportError;
+    use crate::tls::endpoint::{ClientTls, ServerTls};
+    use crate::tls::test_support::{cache_trusting, issuer, node_identity};
     use super::super::actions::{Actions, Handler};
 
     struct EchoHandler;
@@ -139,23 +155,30 @@ mod tests {
 
     #[tokio::test]
     async fn resilient_server_echoes_request() -> Result<(), Box<dyn std::error::Error>> {
+        let issuer = issuer();
+        let trust = cache_trusting(&[&issuer]);
+        let server_identity = Arc::new(node_identity(&issuer));
+        let client_identity = Arc::new(node_identity(&issuer));
+
         let mut actions = Actions::new();
         actions.register_action("echo", EchoHandler);
         let actions = Arc::new(actions);
 
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
+        let server_tls = ServerTls::new(server_identity, trust.clone())?;
 
         let server_handle = tokio::spawn({
             let actions = actions.clone();
             async move {
                 let (stream, peer) = listener.accept().await?;
-                let server = super::ResilientServer::new(stream, peer, actions);
+                let server = super::ResilientServer::new(stream, peer, actions, server_tls);
                 server.run().await
             }
         });
 
-        let mut client = ResilientClient::new(addr.ip().to_string(), addr.port());
+        let client_tls = ClientTls::new(client_identity, trust)?;
+        let mut client = ResilientClient::new(addr.ip().to_string(), addr.port(), client_tls);
         client.build_stream().await?;
 
         let request = RequestEnvelope {

@@ -7,6 +7,7 @@ use tokio::net::TcpListener;
 use transport::{
     errors::TransportError,
     server::{Actions, Handler, ResilientServer},
+    tls::endpoint::ServerTls,
 };
 
 #[derive(Debug, ByteSerializable)]
@@ -49,7 +50,7 @@ impl Handler for EchoHandler {
     }
 }
 
-pub async fn run_server(addr: SocketAddr) -> Result<(), Box<dyn Error>> {
+pub async fn run_server(addr: SocketAddr, tls: ServerTls) -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind(addr).await?;
     let mut actions = Actions::new();
     actions.register_action("echo", EchoHandler);
@@ -62,8 +63,9 @@ pub async fn run_server(addr: SocketAddr) -> Result<(), Box<dyn Error>> {
         println!("[server] accepted connection from {peer_addr}");
 
         let actions = actions.clone();
+        let tls = tls.clone();
         tokio::spawn(async move {
-            let server = ResilientServer::new(socket, peer_addr, actions);
+            let server = ResilientServer::new(socket, peer_addr, actions, tls);
             if let Err(err) = server.run().await {
                 eprintln!("[server {peer_addr}] connection error: {err}");
             }
