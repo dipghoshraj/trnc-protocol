@@ -92,7 +92,7 @@ transport crate
 │              TRNC Wire Format                                 │
 │   16-byte header + opaque payload                              │
 ├─────────────────────────────────────────────────────────────┤
-│         TLS (rustls) — planned, not yet wired in               │
+│         TLS 1.3 (rustls) — interface/src/tls, pluggable via SecureStreamProvider │
 ├─────────────────────────────────────────────────────────────┤
 │              TCP (tokio)                                       │
 └─────────────────────────────────────────────────────────────┘

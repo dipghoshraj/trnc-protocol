@@ -1,5 +1,11 @@
 # TLS Implementation Plan for TRNC
 
+> **Superseded.** This plan put TLS and a `NodeCredential` identity model inside `transport`. The implemented design differs in two ways:
+> - `transport` has no TLS code. It exposes the generic `SecureStreamProvider` trait in [`transport/src/secure.rs`](../transport/src/secure.rs).
+> - The TLS adapter lives in the application layer at `interface/src/tls/`. It uses an explicit root CA set, WebPKI name and validity checks, and an optional SPKI SHA-256 pin. `NodeCredential` and the network-signed trust model are deferred and are not implemented.
+>
+> See [`INTERFACE_GUIDE.md`](INTERFACE_GUIDE.md#secure-transport) for the current design. The text below is kept as design history.
+
 > Goal: add TLS 1.3 to the `transport` crate so that TRNC connections are encrypted **and** the peer is authenticated using the network-signed credential model from [`doc/communication/trust.md`](../communication/trust.md). We are **not** building a traditional Web-PKI/mTLS system; we are building a trust model that prevents TLS termination and MITM attacks by binding the TLS session to a stable node identity.
 
 ---

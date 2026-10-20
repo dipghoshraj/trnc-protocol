@@ -1,10 +1,12 @@
+﻿use std::net::SocketAddr;
 use std::sync::Arc;
-use std::net::SocketAddr;
 use byteser::ByteSerializable;
 use tokio::net::TcpStream;
-use crate::server::actions::Actions;
+use tokio::time::timeout;
 use byteser_derive::ByteSerializable;
+use crate::server::actions::Actions;
 use crate::server::dispatcher;
+use crate::secure::{HANDSHAKE_TIMEOUT, SecureStreamProvider};
 
 use crate::{
     errors::{ErrorPayload, TransportError},
@@ -12,8 +14,9 @@ use crate::{
     tcp::{connection::Connection, manager::{Role, StreamManager}},
 };
 
-pub struct ResilientServer {
-    stream: TcpStream,
+pub struct ResilientServer<P: SecureStreamProvider> {
+    provider: Arc<P>,
+    tcp: TcpStream,
     peer: SocketAddr,
     actions: Arc<Actions>,
 }
@@ -29,11 +32,9 @@ pub struct ResponseEnvelope {
     pub payload: Vec<u8>,
 }
 
-
-
-impl ResilientServer {
-    pub fn new(stream: TcpStream, peer: SocketAddr, actions: Arc<Actions>) -> Self {
-        ResilientServer { stream, peer, actions }
+impl<P: SecureStreamProvider> ResilientServer<P> {
+    pub fn new(provider: Arc<P>, stream: TcpStream, peer: SocketAddr, actions: Arc<Actions>) -> Self {
+        ResilientServer { provider, tcp: stream, peer, actions }
     }
 
     pub async fn handle_request(
@@ -45,10 +46,20 @@ impl ResilientServer {
         })
     }
 
+    /// Serves one connection until the peer disconnects.
+    ///
+    /// The secure handshake runs before any protocol frame is read. If it fails
+    /// or exceeds [`HANDSHAKE_TIMEOUT`], this returns an error without touching
+    /// the protocol layer.
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut manager = StreamManager::new(Connection::new(self.stream), Role::Acceptor);
-        let peer = self.peer;
-        let dispatcher = dispatcher::Dispatcher::new(self.actions.clone());
+        let Self { provider, tcp, peer, actions } = self;
+
+        let stream = timeout(HANDSHAKE_TIMEOUT, provider.accept(tcp))
+            .await
+            .map_err(|_| TransportError::Timeout)??;
+
+        let mut manager = StreamManager::new(Connection::new(stream), Role::Acceptor);
+        let dispatcher = dispatcher::Dispatcher::new(actions);
 
         loop {
             let frame = match manager.recv_frame().await {
@@ -126,6 +137,7 @@ mod tests {
     use super::{RequestEnvelope, ResponseEnvelope};
     use crate::client::resilient_client::ResilientClient;
     use crate::errors::TransportError;
+    use crate::testing::PlaintextProvider;
     use super::super::actions::{Actions, Handler};
 
     struct EchoHandler;
@@ -137,11 +149,15 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn resilient_server_echoes_request() -> Result<(), Box<dyn std::error::Error>> {
+    fn echo_actions() -> Arc<Actions> {
         let mut actions = Actions::new();
         actions.register_action("echo", EchoHandler);
-        let actions = Arc::new(actions);
+        Arc::new(actions)
+    }
+
+    #[tokio::test]
+    async fn resilient_server_echoes_request() -> Result<(), Box<dyn std::error::Error>> {
+        let actions = echo_actions();
 
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
@@ -150,12 +166,12 @@ mod tests {
             let actions = actions.clone();
             async move {
                 let (stream, peer) = listener.accept().await?;
-                let server = super::ResilientServer::new(stream, peer, actions);
+                let server = super::ResilientServer::new(Arc::new(PlaintextProvider), stream, peer, actions);
                 server.run().await
             }
         });
 
-        let mut client = ResilientClient::new(addr.ip().to_string(), addr.port());
+        let mut client = ResilientClient::new(PlaintextProvider, addr.ip().to_string(), addr.port());
         client.build_stream().await?;
 
         let request = RequestEnvelope {
@@ -170,6 +186,38 @@ mod tests {
         let _ = server_handle.await?;
         Ok(())
     }
+
+    #[tokio::test]
+    async fn resilient_client_reuses_connection_for_multiple_requests() -> Result<(), Box<dyn std::error::Error>> {
+        let actions = echo_actions();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+
+        let server_handle = tokio::spawn({
+            let actions = actions.clone();
+            async move {
+                let (stream, peer) = listener.accept().await?;
+                let server = super::ResilientServer::new(Arc::new(PlaintextProvider), stream, peer, actions);
+                server.run().await
+            }
+        });
+
+        let mut client = ResilientClient::new(PlaintextProvider, addr.ip().to_string(), addr.port());
+        client.build_stream().await?;
+
+        for i in 0..3u8 {
+            let payload = vec![b'a' + i; 4];
+            let request = RequestEnvelope {
+                action: "echo".to_string(),
+                payload: payload.clone(),
+            };
+            let response: ResponseEnvelope = client.send_message(&request).await?;
+            assert_eq!(response.payload, payload);
+        }
+
+        client.close().await?;
+        let _ = server_handle.await?;
+        Ok(())
+    }
 }
-
-

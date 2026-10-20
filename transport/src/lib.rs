@@ -29,4 +29,7 @@ pub mod errors;
 pub mod tcp;
 pub mod client;
 pub mod server;
-pub mod tls;
+pub mod secure;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;

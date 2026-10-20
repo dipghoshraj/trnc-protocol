@@ -121,7 +121,6 @@ pub enum TransportError {
     FrameTooLarge { size: usize, max: usize },
     /// The underlying I/O stream was closed by the remote peer.
     ConnectionClosed,
-    // TlsError(rustls::Error),
     /// An operation targeted a stream that has already been closed.
     StreamClosed(u32),
     /// The identified stream was reset by the remote peer.
@@ -145,6 +144,8 @@ pub enum TransportError {
     Timeout,
     /// An underlying [`std::io::Error`].
     Io(std::io::Error),
+    /// A [`crate::secure::SecureStreamProvider`] failed to establish a secure stream.
+    SecureHandshake(String),
 
     /// An operation targeted a stream that does not exist.
     UnknownStream(u32),
@@ -165,7 +166,6 @@ impl std::fmt::Display for TransportError {
             TransportError::InvalidFrame(msg) => write!(f, "Invalid frame: {}", msg),
             TransportError::FrameTooLarge { size, max } => write!(f, "Frame too large: size {}, max {}", size, max),
             TransportError::ConnectionClosed => write!(f, "Connection closed"),
-            // TransportError::TlsError(e) => write!(f, "TLS error: {}", e),
             TransportError::StreamClosed(id) => write!(f, "Stream {} is closed", id),
             TransportError::StreamReset(id) => write!(f, "Stream {} was reset by remote", id),
             TransportError::FlowControlViolation { stream_id } => write!(f, "Flow control violation on stream {}", stream_id),
@@ -175,6 +175,7 @@ impl std::fmt::Display for TransportError {
             TransportError::BufferOverflow => write!(f, "Buffer overflow"),
             TransportError::Timeout => write!(f, "Operation timed out"),
             TransportError::Io(e) => write!(f, "I/O error: {}", e),
+            TransportError::SecureHandshake(msg) => write!(f, "Secure handshake failed: {}", msg),
             TransportError::StreamIdExhausted => write!(f, "No more stream IDs available"),
             TransportError::UnknownStream(id) => write!(f, "Unknown stream: {}", id),
             TransportError::StreamNotWritable(id) => write!(f, "Stream {} is not writable", id),

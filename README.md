@@ -1,6 +1,6 @@
 # trnc-protocol
 
-A robust, async-first transport protocol implementation in Rust with resilient client-server communication, TLS support, and comprehensive testing interfaces.
+A robust, async-first transport protocol implementation in Rust with resilient client-server communication, a pluggable secure-stream seam, and comprehensive testing interfaces.
 
 ## 🎯 Project Overview
 
@@ -8,7 +8,7 @@ A robust, async-first transport protocol implementation in Rust with resilient c
 
 - **Resilient Client/Server**: Automatic reconnection and connection pooling
 - **Binary Frame Protocol**: Efficient frame encoding/decoding with headers
-- **TLS Support**: Secure encrypted connections using rustls
+- **Secure Transport**: Pluggable `SecureStreamProvider` seam; TLS 1.3 with rustls in the interface layer
 - **Async Architecture**: Built on Tokio for high-concurrency scenarios
 - **Type-Safe Serialization**: ByteSerializable pattern for request/response messages
 - **Handler Pattern**: Extensible action-based request dispatching
@@ -23,7 +23,7 @@ trnc-protocol/
 │   │   ├── server/            # ResilientServer & dispatcher
 │   │   ├── frame/             # Frame encoder/decoder
 │   │   ├── tcp/               # TCP connection management
-│   │   ├── tls/               # TLS support
+│   │   ├── secure.rs          # SecureStreamProvider trait (no TLS)
 │   │   ├── errors.rs          # Error definitions
 │   │   └── lib.rs             # Module exports
 │   ├── test/                  # Integration tests
@@ -94,10 +94,7 @@ cargo run --bin client -- --addr 127.0.0.1:5000 --message "Hello Protocol"
 - Header: Frame metadata (type, length)
 - Types: Data, Close, Reset, Error
 
-**TLS Module**: Secure connections
-- rustls-based encryption
-- Certificate/PEM handling
-- Transparent to application layer
+**Secure Stream Seam**: `SecureStreamProvider` wraps a TCP stream during connect and accept. The transport has no TLS dependency. A test-only plaintext provider is available behind the `test-support` feature.
 
 ### Interface Layer (`interface/`)
 
@@ -125,8 +122,8 @@ cargo run --bin client -- --addr 127.0.0.1:5000 --message "Hello Protocol"
 | Serialization | byteser | 0.1.1 |
 | Async Traits | async-trait | 0.1.68 |
 | CLI Parsing | clap | 4.4+ |
-| TLS | rustls | 0.23.43 |
-| TLS Runtime | tokio-rustls | 0.26.4 |
+| TLS (interface layer) | rustls | 0.23 |
+| TLS Runtime (interface layer) | tokio-rustls | 0.26 |
 
 ## 📖 Documentation
 
@@ -139,7 +136,7 @@ cargo run --bin client -- --addr 127.0.0.1:5000 --message "Hello Protocol"
 ✅ **Async/Await**: Full async support with Tokio  
 ✅ **Error Handling**: Comprehensive TransportError types  
 ✅ **Binary Protocol**: Efficient frame-based messaging  
-✅ **TLS Ready**: Secure connections out of the box  
+✅ **TLS 1.3 Example**: Certificate verification, explicit trust roots, and optional SPKI pinning in the interface layer  
 ✅ **Handler Pattern**: Extensible request processing  
 ✅ **Type Safety**: Rust's type system prevents data corruption  
 ✅ **CLI Tools**: Easy testing with built-in binaries  

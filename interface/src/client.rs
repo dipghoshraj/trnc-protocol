@@ -3,6 +3,7 @@ use std::{error::Error, net::SocketAddr};
 use byteser::ByteSerializable;
 use byteser_derive::ByteSerializable;
 use transport::client::resilient_client::ResilientClient;
+use transport::secure::SecureStreamProvider;
 use transport::server::RequestEnvelope;
 
 #[derive(Debug, ByteSerializable)]
@@ -22,11 +23,18 @@ struct User {
     age: u32,
 }
 
-pub async fn resilient_client_run(addr: SocketAddr, message: String) -> Result<(), Box<dyn Error>> {
+pub async fn resilient_client_run<P>(
+    addr: SocketAddr,
+    message: String,
+    provider: P,
+) -> Result<(), Box<dyn Error>>
+where
+    P: SecureStreamProvider,
+{
     let host = addr.ip().to_string();
     let port = addr.port();
 
-    let mut client = ResilientClient::new(host, port);
+    let mut client = ResilientClient::new(provider, host, port);
     client.build_stream().await?;
     println!("[client] connected to {addr}");
 
