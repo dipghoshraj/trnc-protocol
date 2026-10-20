@@ -1,50 +1,68 @@
-use std::net::SocketAddr;
-use tokio::net::TcpStream;
+﻿use tokio::net::TcpStream;
+use tokio::time::timeout;
 use byteser::ByteSerializable;
 use crate::{
     errors::{ErrorPayload, TransportError},
     frame::frame::Frametype,
+    secure::{HANDSHAKE_TIMEOUT, SecureStreamProvider},
     tcp::{connection::Connection, manager::{Role, StreamManager}},
 };
 
-#[derive(Debug)]
-pub struct ResilientClient {
-    // Fields for the ResilientClient struct
-    // tls_enabled: bool, 
-    sockaddr: SocketAddr,
-    tcp_stream: Option<TcpStream>,
+/// Request/response client that runs every exchange over a stream from `P`.
+pub struct ResilientClient<P: SecureStreamProvider> {
+    host: String,
+    port: u16,
+    provider: P,
+    manager: Option<StreamManager<P::Stream>>,
 }
 
-impl ResilientClient {
-    pub fn new(host: String, port: u16) -> Self {
-        let sockaddr = format!("{}:{}", host, port)
-            .parse()
-            .expect("Invalid socket address");
+impl<P: SecureStreamProvider> ResilientClient<P> {
+    /// `host` is resolved when connecting and is also the server name the provider verifies the peer against.
+    pub fn new(provider: P, host: String, port: u16) -> Self {
         ResilientClient {
-            // tls_enabled,
-            sockaddr,
-            tcp_stream: None,
+            host,
+            port,
+            provider,
+            manager: None,
         }
     }
 
-    pub fn get_socket_addr(&self) -> SocketAddr {
-        self.sockaddr
-    }
-
+    /// Connects, runs the secure handshake, and completes the protocol Hello/Welcome exchange.
+    ///
+    /// The connection is reused by every subsequent [`send_message`](Self::send_message) call.
     pub async fn build_stream(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let tcp = TcpStream::connect(self.sockaddr).await?;
-        println!("[client] connected to {}", self.sockaddr);
-        self.tcp_stream = Some(tcp);
+        let tcp = TcpStream::connect((self.host.as_str(), self.port)).await?;
+        let stream = timeout(HANDSHAKE_TIMEOUT, self.provider.connect(tcp, &self.host))
+            .await
+            .map_err(|_| TransportError::Timeout)??;
+
+        let mut manager = StreamManager::new(Connection::new(stream), Role::Initiator);
+        timeout(HANDSHAKE_TIMEOUT, manager.start_handshake())
+            .await
+            .map_err(|_| TransportError::Timeout)??;
+
+        println!("[client] connected to {}:{}", self.host, self.port);
+        self.manager = Some(manager);
         Ok(())
     }
 
     pub async fn send_message<T: ByteSerializable, R: ByteSerializable>(&mut self, message: &T) -> Result<R, Box<dyn std::error::Error>> {
-        let tcp = self.tcp_stream.take().ok_or_else(|| {
+        let manager = self.manager.as_mut().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::NotConnected, "TCP stream is not initialized")
         })?;
 
-        let mut manager = StreamManager::new(Connection::new(tcp), Role::Initiator);
-        manager.start_handshake().await?;
+        let result = Self::exchange(manager, message).await;
+        if result.is_err() {
+            // A failed exchange can leave unread frames on the wire, so the connection is discarded.
+            self.manager = None;
+        }
+        result
+    }
+
+    async fn exchange<T: ByteSerializable, R: ByteSerializable>(
+        manager: &mut StreamManager<P::Stream>,
+        message: &T,
+    ) -> Result<R, Box<dyn std::error::Error>> {
         let stream_id = manager.open_stream().await?;
         println!("[client] opened stream {stream_id}");
 
@@ -90,17 +108,14 @@ impl ResilientClient {
             }
         };
 
-        let tcp = manager.into_connection().into_inner();
-        self.tcp_stream = Some(tcp);
-
         let mut slice: &[u8] = &response_payload;
         let response = R::byte_deserialize(&mut slice)?;
         Ok(response)
     }
 
+    /// Drops the connection. Dropping the underlying stream closes the socket.
     pub async fn close(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.tcp_stream.take(); // Drop the TcpStream to close the connection
-        self.tcp_stream = None;
+        self.manager = None;
         Ok(())
     }
 }

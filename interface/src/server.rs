@@ -6,6 +6,7 @@ use byteser_derive::ByteSerializable;
 use tokio::net::TcpListener;
 use transport::{
     errors::TransportError,
+    secure::SecureStreamProvider,
     server::{Actions, Handler, ResilientServer},
 };
 
@@ -49,11 +50,15 @@ impl Handler for EchoHandler {
     }
 }
 
-pub async fn run_server(addr: SocketAddr) -> Result<(), Box<dyn Error>> {
+pub async fn run_server<P>(addr: SocketAddr, provider: P) -> Result<(), Box<dyn Error>>
+where
+    P: SecureStreamProvider + Send + Sync + 'static,
+{
     let listener = TcpListener::bind(addr).await?;
     let mut actions = Actions::new();
     actions.register_action("echo", EchoHandler);
     let actions = Arc::new(actions);
+    let provider = Arc::new(provider);
 
     println!("[server] listening on {addr}");
 
@@ -62,8 +67,9 @@ pub async fn run_server(addr: SocketAddr) -> Result<(), Box<dyn Error>> {
         println!("[server] accepted connection from {peer_addr}");
 
         let actions = actions.clone();
+        let provider = provider.clone();
         tokio::spawn(async move {
-            let server = ResilientServer::new(socket, peer_addr, actions);
+            let server = ResilientServer::new(provider, socket, peer_addr, actions);
             if let Err(err) = server.run().await {
                 eprintln!("[server {peer_addr}] connection error: {err}");
             }

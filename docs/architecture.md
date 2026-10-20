@@ -65,7 +65,8 @@ The crate is intentionally **application-agnostic**. It moves opaque byte payloa
 │              TRNC Wire Format                 │
 │   16-byte header + opaque payload             │
 ├───────────────────────────────────────────────┤
-│         TLS (rustls) — planned                │
+│   Secure stream seam (SecureStreamProvider)    │
+│   TLS 1.3 lives in interface/src/tls          │
 ├───────────────────────────────────────────────┤
 │              TCP (tokio)                      │
 └───────────────────────────────────────────────┘
@@ -443,7 +444,7 @@ Wire-level error codes (transmitted inside `Error` frames as `u16` big-endian):
 
 | Feature                  | Status          | Notes                                                      |
 |--------------------------|-----------------|------------------------------------------------------------|
-| TLS + network-verified peer identity (rustls) | Planned         | `TlsError` variant is commented out in `errors.rs`        |
+| TLS 1.3 with certificate verification and optional SPKI pinning | Implemented (interface layer) | `interface/src/tls/`; transport exposes only the `SecureStreamProvider` seam. Network-signed `NodeCredential` identity is deferred. |
 | Handshake (`Hello`/`Welcome`) | Implemented | `Hello`/`Welcome` handshake state machine is implemented in `StreamManager` |
 | `Settings` frame         | Partial         | Connection-level settings are accepted and validated; no application-specific behavior yet |
 | `Error` frame dispatch   | Implemented     | `ErrorPayload` is decoded and received `Error` frames become `TransportError` |

@@ -458,4 +458,4 @@ layer:
 | No timeouts | `send_message`'s `recv_frame` loop and `run`'s loop both block indefinitely; a hung or silent peer will stall the caller forever (`TransportError::Timeout` exists but is not wired up here). |
 | One in-flight request per client | Each `send_message` call opens and fully closes its own stream before returning; `ResilientClient` does not pipeline or multiplex multiple concurrent requests over one connection. |
 | No structured error response to the client | If `RequestEnvelope` deserialization or dispatch fails on the server, the connection's `run` loop returns an `Err` and terminates — no `Error` frame is currently sent back describing the failure. |
-| No TLS | Connections are plain TCP; see [`architecture.md §13`](architecture.md#13-what-is-not-implemented-yet) for the crate-wide TLS status. |
+| No TLS in transport | `transport` only defines the `SecureStreamProvider` seam. The TLS 1.3 adapter is in the interface layer; see [`INTERFACE_GUIDE.md`](INTERFACE_GUIDE.md#secure-transport). |
